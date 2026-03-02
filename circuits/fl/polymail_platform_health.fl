@@ -1,0 +1,284 @@
+/// Poly Mail Platform Health — Blind relay pattern health monitoring
+///
+/// Aggregates mailbox-operation metrics through blinded, cohort-enforced telemetry.
+/// Stratum: kv store + lex governance under esn/global/org/polylabs/mail.
+/// Cortex: obfuscation, write-time inference, anomaly alerting to mail-team.
+///
+/// Zero-linkage: HKDF("poly-mail-telemetry-v1") isolates all identity.
+/// No email content, addresses, subjects, or mailbox structure ever reach StreamSight.
+///
+/// govern lex esn/global/org/polylabs/mail
+
+import polykit_blind_telemetry from "../../polykit/circuits/fl/polykit_blind_telemetry.fl"
+import polykit_metering from "../../polykit/circuits/fl/polykit_metering.fl"
+
+// ── Data Declarations with Stratum + Cortex ─────────────────────────
+
+data PlatformMetrics : app v1 {
+    blinded_user_id: bytes(32),
+    cohort_ok: bool,
+    cohort_size: u32,
+    platform_queries: u64,
+    active_mailboxes: u64,
+    messages_processed: u64,
+    spam_detections: u64,
+    encryption_ops: u64,
+    storage_bytes: u64,
+    all_healthy: bool,
+    content_visible: bool,
+    baseline_deviation: f64,
+    anomaly_score: f64,
+    spam_rate_per_hr: f64,
+    collected_at: u64,
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail
+    cortex {
+        obfuscate [blinded_user_id, anomaly_score, spam_rate_per_hr]
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
+
+type HealthStatus = enum {
+    Healthy,
+    Degraded,
+    Critical,
+}
+
+// ── Streams ─────────────────────────────────────────────────────────
+
+stream mail_health_events: event<PlatformMetrics>
+    retention 365d
+    consumers [streamsight, audit_trail]
+    classify blinded_user_id: METADATA, cohort_size: METADATA
+
+stream mail_anomaly_events: event<PlatformMetrics>
+    retention forever
+    consumers [streamsight, governance, alerting]
+
+// ── Series ──────────────────────────────────────────────────────────
+
+series mail_health_series: mail_health_events
+    merkle_chain true
+    lattice_imprint true
+    witness_attest true
+
+// ── Main Platform Health Circuit ────────────────────────────────────
+
+circuit mail_platform_health(
+    spark_id: bytes(32),
+    active_user_count: u32,
+    platform_queries: u64,
+    active_mailboxes: u64,
+    messages_processed: u64,
+    spam_detections: u64,
+    encryption_ops: u64,
+    storage_bytes: u64,
+    window_hours: f64,
+) -> PlatformMetrics
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail {
+        governance hierarchical
+        audit_trail true
+        sub_lex mailbox fan_in
+    }
+    precision C
+    streamsight true
+    povc true
+    observe metrics: [platform_queries, active_mailboxes, messages_processed, spam_detections, encryption_ops, storage_bytes]
+    invariant "no_content_at_platform" { content_visible == false }
+    property safety "session_isolation" { no_cross_session_data }
+    property liveness "eventually_healthy" { eventually(all_healthy == true) }
+    monitor "spam_detection_rate" { spam_detections < 10000/hr }
+    esz_emit "verify/mail_health.esz"
+    li_feed full_escir true, optimized_ir true, optimization_metadata true
+    fuzz_target
+    test golden "healthy_platform" {
+        let spark = bytes(32, 0xAA)
+        let result = mail_platform_health(spark, 250, 12000, 230, 85000, 1200, 170000, 5368709120, 1.0)
+        assert result.all_healthy == true
+        assert result.content_visible == false
+        assert result.cohort_ok == true
+    }
+    test golden "spam_spike_degrades" {
+        let spark = bytes(32, 0xCC)
+        let result = mail_platform_health(spark, 200, 8000, 180, 50000, 15000, 100000, 2147483648, 1.0)
+        assert result.all_healthy == false
+        assert result.content_visible == false
+    }
+    test golden "small_cohort_still_collects" {
+        let spark = bytes(32, 0xBB)
+        let result = mail_platform_health(spark, 10, 100, 8, 200, 5, 400, 1048576, 1.0)
+        assert result.cohort_ok == false
+        assert result.content_visible == false
+    }
+{
+    let ts = now_ns() / 1000000
+
+    let blinded = polykit_blind_telemetry::blind_user_id(spark_id, "poly-mail-telemetry-v1")
+
+    let (cohort_status, cohort_ok) = polykit_blind_telemetry::enforce_cohort(active_user_count, 50)
+
+    let spam_baseline = streamsight_baseline("spam_detections", 3600000)
+    let current_deviation = if spam_baseline > 0 {
+        abs(spam_detections - spam_baseline) / spam_baseline
+    } else {
+        0.0
+    }
+
+    let spam_per_hr = if window_hours > 0.0 {
+        spam_detections / window_hours
+    } else {
+        spam_detections
+    }
+
+    let anomaly = streamsight_anomaly("mail_health", PlatformMetrics {
+        platform_queries: platform_queries,
+        active_mailboxes: active_mailboxes,
+        messages_processed: messages_processed,
+        spam_detections: spam_detections,
+        encryption_ops: encryption_ops,
+        storage_bytes: storage_bytes,
+    })
+
+    let spam_healthy = spam_per_hr < 10000.0
+    let encryption_healthy = encryption_ops >= messages_processed
+    let storage_healthy = storage_bytes > 0
+    let all_ok = spam_healthy && encryption_healthy && storage_healthy
+
+    if anomaly.is_anomalous {
+        let alert_metrics = PlatformMetrics {
+            blinded_user_id: blinded,
+            cohort_ok: cohort_ok,
+            cohort_size: active_user_count,
+            platform_queries: platform_queries,
+            active_mailboxes: active_mailboxes,
+            messages_processed: messages_processed,
+            spam_detections: spam_detections,
+            encryption_ops: encryption_ops,
+            storage_bytes: storage_bytes,
+            all_healthy: false,
+            content_visible: false,
+            baseline_deviation: current_deviation,
+            anomaly_score: anomaly.score,
+            spam_rate_per_hr: spam_per_hr,
+            collected_at: ts,
+        }
+        emit(mail_anomaly_events, alert_metrics)
+    }
+
+    let metrics = PlatformMetrics {
+        blinded_user_id: blinded,
+        cohort_ok: cohort_ok,
+        cohort_size: active_user_count,
+        platform_queries: platform_queries,
+        active_mailboxes: active_mailboxes,
+        messages_processed: messages_processed,
+        spam_detections: spam_detections,
+        encryption_ops: encryption_ops,
+        storage_bytes: storage_bytes,
+        all_healthy: all_ok,
+        content_visible: false,
+        baseline_deviation: current_deviation,
+        anomaly_score: anomaly.score,
+        spam_rate_per_hr: spam_per_hr,
+        collected_at: ts,
+    }
+
+    if cohort_ok {
+        emit(mail_health_events, metrics)
+        eslite_insert("mail_health", sha3_256(serialize(metrics)), metrics)
+    }
+
+    metrics
+}
+
+// ── Anomaly Check Circuit with Cortex AI Feed ───────────────────────
+
+circuit mail_anomaly_check(
+    recent_metrics: list<PlatformMetrics>,
+    window_ms: u64,
+) -> (HealthStatus, f64, string)
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail {
+        governance hierarchical
+        audit_trail true
+    }
+    precision C
+    streamsight true
+    observe metrics: [anomaly_checks, anomaly_detections]
+    monitor "anomaly_rate" { anomaly_detections < 50/hr }
+    cortex {
+        ai_feed {
+            model "mail_health_classifier"
+            input [recent_metrics, window_ms]
+            output [health_status, confidence, explanation]
+            retrain on_drift
+            drift_threshold 0.10
+        }
+    }
+    test golden "no_anomaly_healthy" {
+        let m = [PlatformMetrics {
+            blinded_user_id: bytes(32, 0x00),
+            cohort_ok: true,
+            cohort_size: 250,
+            platform_queries: 12000,
+            active_mailboxes: 230,
+            messages_processed: 85000,
+            spam_detections: 1200,
+            encryption_ops: 170000,
+            storage_bytes: 5368709120,
+            all_healthy: true,
+            content_visible: false,
+            baseline_deviation: 0.04,
+            anomaly_score: 0.05,
+            spam_rate_per_hr: 1200.0,
+            collected_at: 1000000,
+        }]
+        let (status, conf, _) = mail_anomaly_check(m, 3600000)
+        assert status == HealthStatus::Healthy
+        assert conf > 0.8
+    }
+{
+    let ts = now_ns() / 1000000
+    let window_start = ts - window_ms
+
+    let windowed = filter(recent_metrics, |m| m.collected_at >= window_start)
+
+    if len(windowed) == 0 {
+        return (HealthStatus::Critical, 1.0, "no metrics in window")
+    }
+
+    let avg_deviation = sum(map(windowed, |m| m.baseline_deviation)) / len(windowed)
+    let max_anomaly = max(map(windowed, |m| m.anomaly_score))
+    let unhealthy_count = count(windowed, |m| !m.all_healthy)
+    let unhealthy_ratio = unhealthy_count / len(windowed)
+
+    let max_spam_rate = max(map(windowed, |m| m.spam_rate_per_hr))
+    let avg_encryption_ratio = sum(map(windowed, |m| {
+        if m.messages_processed > 0 { m.encryption_ops / m.messages_processed } else { 1.0 }
+    })) / len(windowed)
+
+    let cortex_result = cortex_infer("mail_health_classifier", {
+        deviations: map(windowed, |m| m.baseline_deviation),
+        anomaly_scores: map(windowed, |m| m.anomaly_score),
+        spam_trend: map(windowed, |m| m.spam_rate_per_hr),
+        encryption_ops_trend: map(windowed, |m| m.encryption_ops),
+        message_volume_trend: map(windowed, |m| m.messages_processed),
+        storage_trend: map(windowed, |m| m.storage_bytes),
+    })
+
+    let (status, confidence, explanation) = if max_spam_rate > 10000.0 {
+        (HealthStatus::Critical, 1.0, "spam rate exceeds 10k/hr threshold")
+    } else if max_anomaly > 0.8 || unhealthy_ratio > 0.5 {
+        (HealthStatus::Critical, max_anomaly, cortex_result.explanation)
+    } else if avg_deviation > 0.10 || unhealthy_ratio > 0.2 || avg_encryption_ratio < 0.95 {
+        (HealthStatus::Degraded, avg_deviation, cortex_result.explanation)
+    } else {
+        (HealthStatus::Healthy, 1.0 - avg_deviation, "all mail operations within baseline")
+    }
+
+    streamsight_baseline("mail_anomaly_score", window_ms)
+
+    (status, confidence, explanation)
+}

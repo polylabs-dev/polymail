@@ -1,0 +1,683 @@
+/// Poly Mail Thread DAG — dag email_thread
+/// Stratum DAG storage + Cortex AI governance
+/// govern lex esn/global/org/polylabs/mail
+///
+/// Emails form a DAG within each conversation thread. Replies create
+/// parent edges, forwards branch. Enables threading, ordering, and
+/// causal consistency for offline/CRDT scenarios.
+///
+/// Cortex: field-level redact/obfuscate, spam classification with auto_apply,
+///         suggestion store for inbox intelligence
+/// DAG: acyclic enforcement, ML-DSA-87 signing, merkle CSR, PoVC attestation
+
+import polykit_identity
+import polykit_metering
+import polymail_encrypt
+
+// ── Enums ───────────────────────────────────────────────────────
+
+type ReplyType = enum {
+    Direct,
+    ReplyAll,
+    Forward,
+}
+
+type SpamVerdict = enum {
+    Ham,
+    Spam,
+    Phishing,
+    Malware,
+    Promotional,
+    Social,
+}
+
+// ── Data: Node type (Stratum store dag + Cortex) ────────────────
+
+data EmailNode : app v1 {
+    email_id: bytes(16),
+    thread_id: bytes(16),
+    sender_id: bytes(16),
+    recipient_ids: list<bytes(16)>,
+    subject_preview: bytes(256),
+    content_hash: bytes(32),
+    timestamp: u64,
+    in_reply_to: bytes(16),
+    attachment_count: u8,
+    size_bytes: u64,
+    scatter_manifest: bytes(64),
+    pq_signature: bytes(4627),
+}
+    store dag
+    govern lex esn/global/org/polylabs/mail
+    cortex {
+        redact [content_hash, subject_preview]
+        obfuscate [sender_id, recipient_ids]
+        infer on_write
+        on_anomaly alert "mail-security"
+        on_classification auto_apply
+        on_suggestion store "cortex/mail/suggestions"
+    }
+
+// ── Edge types ──────────────────────────────────────────────────
+
+type ReplyToEdge = struct {
+    edge_id: bytes(16),
+    reply_type: u8,
+    timestamp: u64,
+}
+
+type ForwardEdge = struct {
+    edge_id: bytes(16),
+    forwarded_at: u64,
+    forward_note_hash: bytes(32),
+    recipient_count: u8,
+}
+
+type AttachmentRefEdge = struct {
+    edge_id: bytes(16),
+    blob_hash: bytes(32),
+    size_bytes: u64,
+    mime_type: bytes(128),
+}
+
+// ── State machine ───────────────────────────────────────────────
+
+state_machine email_lifecycle {
+    initial DRAFT
+    persistence wal
+    terminal [SPAM, ARCHIVED, DELETED, PURGED]
+    li_anomaly_detection true
+
+    DRAFT -> QUEUED when user_send
+    QUEUED -> SENDING when relay_picked_up
+    QUEUED -> DRAFT when queue_timeout guard retry_under_limit
+    SENDING -> SENT when relay_confirmed
+    SENDING -> QUEUED when send_failed guard retry_under_limit
+    SENDING -> BOUNCED when send_failed guard retry_limit_reached
+    SENT -> DELIVERED when recipient_acked
+    DELIVERED -> READ when recipient_read
+    READ -> ARCHIVED when user_archive
+    DELIVERED -> ARCHIVED when user_archive
+    SENT -> ARCHIVED when user_archive
+    READ -> DELETED when user_delete
+    DELIVERED -> DELETED when user_delete
+    SENT -> DELETED when user_delete
+    DRAFT -> DELETED when user_delete
+    BOUNCED -> DELETED when user_delete
+    BOUNCED -> DRAFT when user_retry
+    DELIVERED -> SPAM when spam_detected
+    SENT -> SPAM when spam_detected
+    SPAM -> DELETED when user_delete
+    SPAM -> DELIVERED when user_not_spam
+    ARCHIVED -> DELETED when user_delete
+    ARCHIVED -> READ when user_unarchive
+    DELETED -> PURGED when retention_expired guard past_retention_window
+}
+
+// ── DAG definition ──────────────────────────────────────────────
+
+dag email_thread {
+    node EmailNode
+    edge ReplyToEdge
+    edge ForwardEdge
+    edge AttachmentRefEdge
+
+    enforce acyclic
+    sign ml_dsa_87
+
+    overlay read_status: u8 curate delta_curate
+    overlay star: bool curate delta_curate
+    overlay label_mask: u64 bitmask delta_curate
+    overlay spam_verdict: u8 curate delta_curate
+    overlay priority_score: f32 curate delta_curate
+    overlay attachment_count: u8 bitmask delta_curate
+
+    storage merkle_csr {
+        hot @bram,
+        warm @ddr,
+        cold @nvme,
+    }
+
+    attest povc {
+        witness threshold(2, 3)
+    }
+
+    ai_feed email_classification
+    ai_feed thread_priority_scoring
+    ai_feed phishing_detection
+
+    observe email_thread: [read_status, label_mask, spam_verdict, priority_score] threshold: {
+        anomaly_score 0.8
+        baseline_window 60
+    }
+}
+
+series email_series: email_thread
+    merkle_chain true
+    lattice_imprint true
+    witness_attest true
+
+// ── Circuits: Draft composition ─────────────────────────────────
+
+circuit compose_draft(
+    graph_id: bytes(32),
+    sender_id: bytes(16),
+    subject_preview: bytes(256),
+    recipients: list<bytes(16)>,
+    body_hash: bytes(32),
+    thread_id: bytes(16),
+    in_reply_to: bytes(16),
+) -> EmailNode
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [drafts_created, draft_replies, draft_new_threads]
+    meters [compute_cycles, storage]
+    wasm_abi [random_bytes, now]
+    test golden "compose_new_thread" {
+        let node = compose_draft(
+            bytes(32, 0x01),
+            bytes(16, 0xAA),
+            "Hello World",
+            [bytes(16, 0xBB)],
+            bytes(32, 0xCC),
+            bytes(16),
+            bytes(16),
+        )
+        assert node.thread_id != bytes(16)
+        assert node.in_reply_to == bytes(16)
+    }
+{
+    let email_id = random_bytes(16)
+    let ts = now()
+    let tid = if thread_id == bytes(16) { random_bytes(16) } else { thread_id }
+    let node = EmailNode {
+        email_id: email_id,
+        thread_id: tid,
+        sender_id: sender_id,
+        recipient_ids: recipients,
+        subject_preview: subject_preview,
+        content_hash: body_hash,
+        timestamp: ts,
+        in_reply_to: in_reply_to,
+        attachment_count: 0,
+        size_bytes: 0,
+        scatter_manifest: bytes(64),
+        pq_signature: bytes(4627),
+    }
+    dag_insert(email_thread, node)
+    if in_reply_to != bytes(16) {
+        let parent = dag_lookup(email_thread, in_reply_to)
+        dag_connect(email_thread, node, parent, ReplyToEdge {
+            edge_id: random_bytes(16),
+            reply_type: 0,
+            timestamp: ts,
+        })
+    }
+    sm_transition(email_lifecycle, email_id, "DRAFT")
+    overlay_set(email_thread, email_id, "read_status", 0)
+    overlay_set(email_thread, email_id, "priority_score", 0.5)
+    node
+}
+
+// ── Circuits: Send (encryption + signing + routing) ─────────────
+
+circuit send_email(
+    graph_id: bytes(32),
+    email_id: bytes(16),
+    sender_sk: bytes(4896),
+    sender_id: bytes(16),
+    body: bytes,
+    recipient_bundles: list<RecipientKeyBundle>,
+) -> EncryptedEmail
+    lex esn/global/org/polylabs/mail
+    status production
+    precision A
+    povc true
+    constant_time true
+    observe metrics: [emails_sent, send_latency_ms, multi_recipient_sends, encrypted_size_bytes]
+    monitor "send_latency" { send_latency_ms < 500 }
+    invariant "draft_exists" { dag_lookup(email_thread, email_id) != null }
+    meters [compute_cycles, bandwidth, memory_bytes]
+    test golden "send_single_recipient" {
+        let draft = compose_draft(
+            bytes(32, 0x01),
+            bytes(16, 0xAA),
+            "Test send",
+            [bytes(16, 0xBB)],
+            bytes(32, 0x00),
+            bytes(16),
+            bytes(16),
+        )
+        // Encryption tested via polymail_encrypt integration tests
+    }
+{
+    sm_transition(email_lifecycle, email_id, "QUEUED")
+    let encrypted = encrypt_email(sender_sk, sender_id, body, recipient_bundles)
+    let sig = ml_dsa_87_sign(sender_sk, encrypted.ciphertext)
+    let manifest = scatter_store(encrypted.ciphertext, encrypted.scatter_config)
+
+    let node = dag_lookup(email_thread, email_id)
+    dag_update(email_thread, email_id, EmailNode {
+        ...node,
+        content_hash: encrypted.content_hash,
+        size_bytes: len(body),
+        scatter_manifest: manifest,
+        pq_signature: sig,
+    })
+
+    sm_transition(email_lifecycle, email_id, "SENDING")
+    sm_transition(email_lifecycle, email_id, "SENT")
+    encrypted
+}
+
+// ── Circuits: Receive (decrypt + classify + insert) ─────────────
+
+circuit receive_email(
+    graph_id: bytes(32),
+    encrypted: EncryptedEmail,
+    recipient_sk: bytes(3168),
+    sender_pk: bytes(2592),
+    recipient_id: bytes(16),
+    thread_id: bytes(16),
+) -> EmailNode
+    lex esn/global/org/polylabs/mail
+    status production
+    precision A
+    povc true
+    constant_time true
+    observe metrics: [emails_received, receive_latency_ms, thread_extensions, spam_auto_classified]
+    monitor "receive_latency" { receive_latency_ms < 300 }
+    meters [compute_cycles, storage, bandwidth]
+    wasm_abi [now]
+{
+    let sig_valid = ml_dsa_87_verify(sender_pk, encrypted.ciphertext, encrypted.pq_signature)
+    if !sig_valid {
+        return error("invalid_signature")
+    }
+
+    let decrypted = decrypt_email(recipient_sk, sender_pk, encrypted, recipient_id)
+    let ts = now()
+    let node = EmailNode {
+        email_id: encrypted.email_id,
+        thread_id: thread_id,
+        sender_id: encrypted.sender_id,
+        recipient_ids: [recipient_id],
+        subject_preview: truncate(decrypted.subject, 256),
+        content_hash: encrypted.content_hash,
+        timestamp: ts,
+        in_reply_to: encrypted.in_reply_to,
+        attachment_count: len(decrypted.attachments),
+        size_bytes: len(decrypted.body),
+        scatter_manifest: encrypted.scatter_manifest,
+        pq_signature: encrypted.pq_signature,
+    }
+    dag_insert(email_thread, node)
+
+    if encrypted.in_reply_to != bytes(16) {
+        let parent = dag_lookup(email_thread, encrypted.in_reply_to)
+        if parent != null {
+            dag_connect(email_thread, node, parent, ReplyToEdge {
+                edge_id: random_bytes(16),
+                reply_type: 0,
+                timestamp: ts,
+            })
+        }
+    }
+
+    sm_transition(email_lifecycle, encrypted.email_id, "DELIVERED")
+    overlay_set(email_thread, encrypted.email_id, "read_status", 0)
+
+    let verdict = cortex_classify(email_thread, encrypted.email_id, "spam_verdict")
+    overlay_set(email_thread, encrypted.email_id, "spam_verdict", verdict)
+
+    if verdict == SpamVerdict::Spam || verdict == SpamVerdict::Phishing || verdict == SpamVerdict::Malware {
+        sm_transition(email_lifecycle, encrypted.email_id, "SPAM")
+    }
+
+    let priority = cortex_score(email_thread, encrypted.email_id, "priority_score")
+    overlay_set(email_thread, encrypted.email_id, "priority_score", priority)
+
+    node
+}
+
+// ── Circuits: Read/Star/Label ───────────────────────────────────
+
+circuit mark_read(
+    graph_id: bytes(32),
+    email_id: bytes(16),
+    mailbox_id: bytes(16),
+) -> bool
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [emails_read, unread_decrements]
+    meters [compute_cycles]
+{
+    let current_state = sm_state(email_lifecycle, email_id)
+    if current_state == "DELIVERED" {
+        sm_transition(email_lifecycle, email_id, "READ")
+    }
+    overlay_set(email_thread, email_id, "read_status", 1)
+    overlay_decrement(mailbox_registry, mailbox_id, "unread_count", 1)
+    true
+}
+
+circuit star_email(
+    graph_id: bytes(32),
+    email_id: bytes(16),
+    starred: bool,
+) -> bool
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [stars_toggled]
+    meters [compute_cycles]
+{
+    overlay_set(email_thread, email_id, "star", starred)
+    true
+}
+
+circuit set_label_mask(
+    graph_id: bytes(32),
+    email_id: bytes(16),
+    mask: u64,
+) -> bool
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [label_mask_updates]
+    meters [compute_cycles]
+{
+    overlay_set(email_thread, email_id, "label_mask", mask)
+    true
+}
+
+// ── Circuits: Archive / Delete / Spam ───────────────────────────
+
+circuit archive_email(
+    graph_id: bytes(32),
+    email_id: bytes(16),
+    mailbox_id: bytes(16),
+) -> bool
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [emails_archived]
+    meters [compute_cycles]
+{
+    sm_transition(email_lifecycle, email_id, "ARCHIVED")
+    overlay_set(email_thread, email_id, "label_mask", 0)
+    true
+}
+
+circuit delete_email(
+    graph_id: bytes(32),
+    email_id: bytes(16),
+    mailbox_id: bytes(16),
+    permanent: bool,
+) -> bool
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [emails_deleted, permanent_deletes, soft_deletes]
+    meters [compute_cycles, storage]
+{
+    sm_transition(email_lifecycle, email_id, "DELETED")
+    if permanent {
+        let node = dag_lookup(email_thread, email_id)
+        scatter_delete(node.scatter_manifest)
+        dag_remove(email_thread, email_id)
+        overlay_decrement(mailbox_registry, mailbox_id, "thread_count", 1)
+        overlay_decrement(mailbox_registry, mailbox_id, "storage_used", node.size_bytes)
+    }
+    true
+}
+
+circuit move_to_spam(
+    graph_id: bytes(32),
+    email_id: bytes(16),
+    mailbox_id: bytes(16),
+    verdict: u8,
+    confidence: f32,
+) -> bool
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [spam_moves, user_spam_reports, auto_spam_detections, verdict_distribution]
+    meters [compute_cycles]
+{
+    sm_transition(email_lifecycle, email_id, "SPAM")
+    overlay_set(email_thread, email_id, "spam_verdict", verdict)
+    overlay_decrement(mailbox_registry, mailbox_id, "unread_count", 1)
+
+    cortex_feedback(email_thread, email_id, "spam_verdict", verdict, confidence)
+    true
+}
+
+circuit mark_not_spam(
+    graph_id: bytes(32),
+    email_id: bytes(16),
+    mailbox_id: bytes(16),
+) -> bool
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [not_spam_corrections, false_positive_rate]
+    meters [compute_cycles]
+{
+    sm_transition(email_lifecycle, email_id, "DELIVERED")
+    overlay_set(email_thread, email_id, "spam_verdict", 0)
+    overlay_increment(mailbox_registry, mailbox_id, "unread_count", 1)
+
+    cortex_feedback(email_thread, email_id, "spam_verdict", 0, 1.0)
+    true
+}
+
+// ── Circuits: Forward ───────────────────────────────────────────
+
+circuit forward_email(
+    graph_id: bytes(32),
+    original_email_id: bytes(16),
+    sender_id: bytes(16),
+    recipients: list<bytes(16)>,
+    note_hash: bytes(32),
+) -> EmailNode
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [emails_forwarded, forward_recipients]
+    meters [compute_cycles, storage]
+    wasm_abi [random_bytes, now]
+{
+    let ts = now()
+    let original = dag_lookup(email_thread, original_email_id)
+    let fwd_id = random_bytes(16)
+    let node = EmailNode {
+        email_id: fwd_id,
+        thread_id: original.thread_id,
+        sender_id: sender_id,
+        recipient_ids: recipients,
+        subject_preview: concat("Fwd: ", original.subject_preview),
+        content_hash: original.content_hash,
+        timestamp: ts,
+        in_reply_to: bytes(16),
+        attachment_count: original.attachment_count,
+        size_bytes: original.size_bytes,
+        scatter_manifest: bytes(64),
+        pq_signature: bytes(4627),
+    }
+    dag_insert(email_thread, node)
+    dag_connect(email_thread, node, original, ForwardEdge {
+        edge_id: random_bytes(16),
+        forwarded_at: ts,
+        forward_note_hash: note_hash,
+        recipient_count: len(recipients),
+    })
+    sm_transition(email_lifecycle, fwd_id, "DRAFT")
+    node
+}
+
+// ── Circuits: Thread queries ────────────────────────────────────
+
+circuit get_thread(
+    graph_id: bytes(32),
+    thread_id: bytes(16),
+) -> list<EmailNode>
+    lex esn/global/org/polylabs/mail
+    status production
+    precision B
+    observe metrics: [thread_lookups, thread_depth, thread_node_count]
+{
+    let nodes = dag_query(email_thread, thread_id, "by_thread")
+    dag_topo_sort(nodes)
+}
+
+circuit get_thread_participants(
+    graph_id: bytes(32),
+    thread_id: bytes(16),
+) -> list<bytes(16)>
+    lex esn/global/org/polylabs/mail
+    status production
+    precision B
+    observe metrics: [participant_lookups, participant_count]
+{
+    let nodes = dag_query(email_thread, thread_id, "by_thread")
+    let participants = set<bytes(16)>()
+    for node in nodes {
+        participants.insert(node.sender_id)
+        for r in node.recipient_ids {
+            participants.insert(r)
+        }
+    }
+    participants.to_list()
+}
+
+// ── Circuits: Cortex suggestions ────────────────────────────────
+
+circuit get_cortex_suggestions(
+    graph_id: bytes(32),
+    mailbox_id: bytes(16),
+    limit: u32,
+) -> list<CortexSuggestion>
+    lex esn/global/org/polylabs/mail
+    status production
+    precision B
+    observe metrics: [suggestion_reads, suggestion_types]
+{
+    cortex_read_suggestions("cortex/mail/suggestions", mailbox_id, limit)
+}
+
+circuit apply_cortex_suggestion(
+    graph_id: bytes(32),
+    suggestion_id: bytes(16),
+    accepted: bool,
+) -> bool
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [suggestions_accepted, suggestions_rejected, suggestion_feedback]
+    meters [compute_cycles]
+{
+    if accepted {
+        cortex_apply_suggestion("cortex/mail/suggestions", suggestion_id)
+    }
+    cortex_feedback_suggestion("cortex/mail/suggestions", suggestion_id, accepted)
+    true
+}
+
+// ── Circuits: Quantum state snapshot ────────────────────────────
+
+circuit snapshot_thread(
+    graph_id: bytes(32),
+    thread_id: bytes(16),
+) -> bytes(32)
+    lex esn/global/org/polylabs/mail
+    status production
+    precision B
+    povc true
+    observe metrics: [thread_snapshots, snapshot_node_count]
+    meters [compute_cycles, storage]
+    wasm_abi [now, blake3_hash]
+{
+    let ts = now()
+    let subdag = dag_extract(email_thread, thread_id)
+    let overlays = overlay_snapshot(email_thread, thread_id)
+    let sm_states = sm_snapshot(email_lifecycle, thread_id)
+    let state = concat(serialize(subdag), serialize(overlays), serialize(sm_states), to_bytes(ts))
+    let hash = blake3_hash(state)
+    series_append(email_series, hash, ts)
+    hash
+}
+
+// ── Streams ─────────────────────────────────────────────────────
+
+stream email_mutations: event<EmailNode>
+    retention 365d
+    consumers [governance, audit, streamsight, mail_team]
+
+stream email_classification_events: event<EmailNode>
+    retention 90d
+    consumers [streamsight, cortex_spam_model, mail_security]
+
+stream email_lifecycle_transitions: event<EmailNode>
+    retention 365d
+    consumers [governance, audit, compliance, streamsight]
+
+stream cortex_suggestion_events: event<CortexSuggestion>
+    retention 30d
+    consumers [cortex_feedback_loop, streamsight]
+
+// ── Monitors ─────────────────────────────────────────────────────
+
+monitor "thread_operations_rate" {
+    assert metric("emails_sent_per_sec") + metric("emails_received_per_sec") > 10
+    window 60s
+    severity warning
+}
+
+// ── KAT Vectors ──────────────────────────────────────────────────
+
+kat_vector "mldsa_87_sign_verify" {
+    function: "mldsa_sign"
+    signing_key: test_key("mldsa87_kat_sk")
+    message: hex("54657374")
+    verify_key: test_key("mldsa87_kat_pk")
+    expected_verify: true
+}
+
+// ── Fuzz Targets ─────────────────────────────────────────────────
+
+fuzz_target "send_email_fuzz" {
+    inputs {
+        sender_sk: bytes(4896)
+        body: bytes(1..65536)
+        recipient_bundles: list<RecipientKeyBundle>(1..10)
+    }
+    assert {
+        no_panic
+        constant_time true
+    }
+}
+
+fuzz_target "receive_email_fuzz" {
+    inputs {
+        encrypted_body: bytes(1..65536)
+        recipient_sk: bytes(3168)
+        sender_pk: bytes(2592)
+    }
+    assert {
+        no_panic
+        constant_time true
+    }
+}

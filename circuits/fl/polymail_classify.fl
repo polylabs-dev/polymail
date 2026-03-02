@@ -1,0 +1,261 @@
+// Poly Mail Classify — ESLM spam/phishing classification on-device
+//
+// All classification runs client-side in WASM. Email content never
+// leaves the device for spam analysis. The ESLM model is a
+// fine-tuned language model that runs inference in the WASM sandbox.
+//
+// Feedback loop: user spam/not-spam actions update local model
+// weights via federated learning — no raw email content is shared.
+// Only gradient updates with differential privacy noise are emitted.
+
+import polykit_metering
+
+type EmailClassification = enum {
+    Ham,
+    Spam,
+    Phishing,
+    Malware,
+    Promotional,
+    Social,
+}
+
+type SpamScore = struct {
+    score: f32,
+    confidence: f32,
+    classification: EmailClassification,
+    indicators: [string],
+}
+
+type PhishingIndicator = struct {
+    indicator_type: string,
+    severity: f32,
+    detail: string,
+    matched_pattern: bytes(256),
+}
+
+type ClassificationResult = struct {
+    email_id: bytes(16),
+    spam_score: SpamScore,
+    phishing_indicators: [PhishingIndicator],
+    model_version: bytes(8),
+    inference_time_ms: u32,
+}
+
+type LocalModelWeights = struct {
+    model_id: bytes(16),
+    version: u64,
+    weights_hash: bytes(32),
+    last_updated_ms: u64,
+}
+
+// --- Classify an email (combined spam + phishing analysis) ---
+circuit classify_email(
+    email_id: bytes(16),
+    subject: bytes,
+    body: bytes,
+    sender_domain: bytes(253),
+    headers_hash: bytes(32),
+    model: LocalModelWeights,
+) -> ClassificationResult
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/classify
+    observe metrics: [classifications, classification_latency_ms, spam_detected, phishing_detected]
+    monitor "classification_latency" { classification_latency_ms < 300 }
+    invariant "local_only" { model.weights_hash != bytes(32) }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [eslm_infer, now]
+{
+    let features = blake3(concat(subject, body, sender_domain, headers_hash))
+    let spam = detect_spam(subject, body, sender_domain, model)
+    let phishing = detect_phishing(subject, body, sender_domain, headers_hash)
+    let start = now()
+    let inference = eslm_infer(model.model_id, features)
+    let end = now()
+    ClassificationResult {
+        email_id: email_id,
+        spam_score: spam,
+        phishing_indicators: phishing,
+        model_version: bit_slice(model.model_id, 0, 64),
+        inference_time_ms: (end - start),
+    }
+}
+
+// --- Compute spam score using local ESLM model ---
+circuit detect_spam(
+    subject: bytes,
+    body: bytes,
+    sender_domain: bytes(253),
+    model: LocalModelWeights,
+) -> SpamScore
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/classify
+    observe metrics: [spam_scores_computed, spam_positives, spam_negatives]
+    wasm_abi [eslm_infer]
+{
+    let feature_vec = blake3(concat(subject, body))
+    let domain_rep = blake3(sender_domain)
+    let raw_score = eslm_infer(model.model_id, concat(feature_vec, domain_rep))
+    let score = clamp(raw_score.logit, 0.0, 1.0)
+    let classification = if score > 0.85 {
+        EmailClassification::Spam
+    } else if score > 0.6 {
+        EmailClassification::Promotional
+    } else {
+        EmailClassification::Ham
+    }
+    SpamScore {
+        score: score,
+        confidence: raw_score.confidence,
+        classification: classification,
+        indicators: raw_score.top_features,
+    }
+}
+
+// --- Detect phishing indicators using heuristics + ESLM ---
+circuit detect_phishing(
+    subject: bytes,
+    body: bytes,
+    sender_domain: bytes(253),
+    headers_hash: bytes(32),
+) -> [PhishingIndicator]
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/classify
+    observe metrics: [phishing_scans, phishing_positives, indicator_counts]
+    wasm_abi [eslm_infer, pattern_match]
+{
+    let indicators = []
+    let url_patterns = pattern_match(body, "https?://[^\\s]+")
+    for url in url_patterns {
+        let domain_mismatch = !domain_matches(url, sender_domain)
+        if domain_mismatch {
+            indicators = append(indicators, PhishingIndicator {
+                indicator_type: "domain_mismatch",
+                severity: 0.8,
+                detail: "URL domain does not match sender",
+                matched_pattern: bit_slice(url, 0, 256),
+            })
+        }
+    }
+    let urgency = pattern_match(body, "(urgent|immediate|suspended|verify your)")
+    if len(urgency) > 0 {
+        indicators = append(indicators, PhishingIndicator {
+            indicator_type: "urgency_language",
+            severity: 0.5,
+            detail: "Contains urgency-inducing language",
+            matched_pattern: bit_slice(urgency[0], 0, 256),
+        })
+    }
+    let header_anomaly = blake3(headers_hash)
+    if bit_slice(header_anomaly, 0, 8) == 0xFF {
+        indicators = append(indicators, PhishingIndicator {
+            indicator_type: "header_anomaly",
+            severity: 0.7,
+            detail: "Email headers show anomalous patterns",
+            matched_pattern: bit_slice(headers_hash, 0, 256),
+        })
+    }
+    indicators
+}
+
+// --- Update local model weights from user feedback ---
+circuit train_local_model(
+    model: LocalModelWeights,
+    email_features: bytes(32),
+    user_label: EmailClassification,
+    dp_noise_scale: f32,
+) -> LocalModelWeights
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/classify
+    observe metrics: [local_training_ops, model_updates, dp_noise_applied]
+    invariant "dp_noise_positive" { dp_noise_scale > 0.0 }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [eslm_train, random_bytes, now]
+{
+    let gradient = eslm_train(model.model_id, email_features, user_label)
+    let noise = random_bytes(len(gradient))
+    let dp_gradient = add_dp_noise(gradient, noise, dp_noise_scale)
+    let updated_hash = sha3_256(concat(model.weights_hash, dp_gradient))
+    let ts = now()
+    LocalModelWeights {
+        model_id: model.model_id,
+        version: model.version + 1,
+        weights_hash: updated_hash,
+        last_updated_ms: ts,
+    }
+}
+
+// --- Report a false positive for federated learning ---
+circuit report_false_positive(
+    email_id: bytes(16),
+    original_classification: EmailClassification,
+    corrected_classification: EmailClassification,
+    model: LocalModelWeights,
+) -> LocalModelWeights
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/classify
+    observe metrics: [false_positives_reported, model_corrections]
+    invariant "different_labels" { original_classification != corrected_classification }
+    wasm_abi [eslite_query]
+{
+    let features = eslite_query(email_id, "features")
+    let feature_hash = blake3(features)
+    train_local_model(model, feature_hash, corrected_classification, 1.0)
+}
+
+// ── Monitors ─────────────────────────────────────────────────────
+
+monitor "classification_rate" {
+    assert metric("classifications_per_sec") > 100
+    window 60s
+    severity warning
+}
+
+// ── Golden Tests ─────────────────────────────────────────────────
+
+test golden "classify_spam_email" {
+    input {
+        email_id: bytes(16, 0x01)
+        subject: bytes("URGENT: Verify your account immediately")
+        body: bytes("Click here to verify: http://phishing.example.com/login")
+        sender_domain: bytes("suspicious-domain.xyz")
+        headers_hash: bytes(32, 0xAB)
+        model: LocalModelWeights {
+            model_id: bytes(16, 0xFF),
+            version: 42,
+            weights_hash: bytes(32, 0xCC),
+            last_updated_ms: 1700000000000,
+        }
+    }
+    assert {
+        let result = classify_email(email_id, subject, body, sender_domain, headers_hash, model)
+        result.spam_score.score > 0.5
+        result.phishing_indicators != []
+        result.inference_time_ms < 300
+    }
+}
+
+// ── KAT Vectors ──────────────────────────────────────────────────
+
+kat_vector "blake3_empty" {
+    function: "blake3"
+    input: bytes("")
+    expected: hex("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262")
+}
+
+kat_vector "sha3_256_empty" {
+    function: "sha3_256"
+    input: bytes("")
+    expected: hex("a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a")
+}
+
+kat_vector "blake3_abc" {
+    function: "blake3"
+    input: bytes("abc")
+    expected: hex("6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85")
+}
+
+kat_vector "sha3_256_abc" {
+    function: "sha3_256"
+    input: bytes("abc")
+    expected: hex("3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532")
+}

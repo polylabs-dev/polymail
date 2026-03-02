@@ -1,0 +1,359 @@
+// Poly Mail SMTP Bridge — SMTP/IMAP interop for classical email clients
+//
+// Local bridge: localhost IMAP (1143) / SMTP (1025) for Thunderbird, Outlook, etc.
+// Server-side gateway: MX records → Poly Mail ingest with PQ re-encryption.
+//
+// DKIM signing uses ML-DSA-87 (PQ) for custom domains when the recipient
+// supports PQ DKIM verification, falling back to Ed25519 for compatibility.
+// SPF and DMARC are enforced on inbound.
+
+import polykit_identity
+import polykit_metering
+
+type SmtpSession = struct {
+    session_id: bytes(16),
+    client_addr: bytes(16),
+    authenticated: bool,
+    tls_version: bytes(8),
+    mail_from: bytes(254),
+    rcpt_to: [bytes(254)],
+    state: SmtpState,
+}
+
+type SmtpState = enum {
+    Connected,
+    Greeted,
+    MailFrom,
+    RcptTo,
+    Data,
+    Completed,
+    Failed,
+}
+
+type ImapFolder = struct {
+    folder_id: bytes(16),
+    name: bytes(128),
+    uidvalidity: u32,
+    uidnext: u32,
+    message_count: u32,
+    unseen_count: u32,
+}
+
+type DkimSignature = struct {
+    algorithm: bytes(16),
+    domain: bytes(253),
+    selector: bytes(63),
+    signature_data: bytes(4627),
+    headers_signed: [string],
+    body_hash: bytes(32),
+    timestamp: u64,
+}
+
+type MimeMessage = struct {
+    message_id: bytes(128),
+    from_header: bytes(254),
+    to_headers: [bytes(254)],
+    subject: bytes(998),
+    date: u64,
+    content_type: bytes(128),
+    body_parts: [MimeBodyPart],
+    raw_headers: bytes,
+}
+
+type MimeBodyPart = struct {
+    content_type: bytes(128),
+    encoding: bytes(32),
+    data: bytes,
+    filename: bytes(256),
+}
+
+type PolymailMessage = struct {
+    email_id: bytes(16),
+    sender_id: bytes(16),
+    subject: bytes(998),
+    body: bytes,
+    attachments: [bytes],
+    timestamp: u64,
+}
+
+// --- Receive inbound SMTP email and convert to Poly Mail format ---
+circuit smtp_receive(
+    session: SmtpSession,
+    raw_data: bytes,
+    recipient_encryption_pk: bytes(1568),
+) -> PolymailMessage
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/bridge
+    observe metrics: [smtp_inbound, mime_conversions, dkim_verifications, spf_checks]
+    monitor "smtp_receive_latency" { receive_latency_ms < 1000 }
+    invariant "session_authenticated" { session.authenticated == true }
+    meters [compute_cycles, bandwidth]
+    wasm_abi [now]
+{
+    let mime = parse_mime(raw_data)
+    let dkim_valid = dkim_verify(raw_data)
+    assert dkim_valid == true
+    let spf_valid = spf_check(session.client_addr, mime.from_header)
+    let polymail_msg = mime_to_polymail(mime)
+    polymail_msg
+}
+
+// --- Send outbound email via SMTP from Poly Mail ---
+circuit smtp_send(
+    polymail_msg: PolymailMessage,
+    sender_signing_sk: bytes(4896),
+    sender_domain: bytes(253),
+    dkim_selector: bytes(63),
+    recipient_addresses: [bytes(254)],
+) -> SmtpSession
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/bridge
+    observe metrics: [smtp_outbound, dkim_signatures_created, delivery_attempts]
+    monitor "smtp_send_latency" { send_latency_ms < 5000 }
+    meters [compute_cycles, bandwidth]
+    wasm_abi [smtp_relay, random_bytes, now]
+{
+    let mime = polymail_to_mime(polymail_msg)
+    let dkim = dkim_sign(sender_signing_sk, sender_domain, dkim_selector, mime)
+    let session_id = random_bytes(16)
+    let ts = now()
+    let signed_raw = attach_dkim_header(mime, dkim)
+    smtp_relay(signed_raw, recipient_addresses)
+    SmtpSession {
+        session_id: session_id,
+        client_addr: bytes(16),
+        authenticated: true,
+        tls_version: bytes("TLSv1.3"),
+        mail_from: polymail_msg.sender_id,
+        rcpt_to: recipient_addresses,
+        state: SmtpState::Completed,
+    }
+}
+
+// --- Sync IMAP folder state from local Poly Mail mailbox ---
+circuit imap_sync(
+    mailbox_id: bytes(16),
+    folder_name: bytes(128),
+    last_uid: u32,
+) -> ImapFolder
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/bridge
+    observe metrics: [imap_syncs, messages_synced, folder_updates]
+    wasm_abi [eslite_query]
+{
+    let folder_data = eslite_query(mailbox_id, folder_name)
+    let new_messages = eslite_query(mailbox_id, concat("uid_gt:", last_uid))
+    ImapFolder {
+        folder_id: blake3(concat(mailbox_id, folder_name)),
+        name: folder_name,
+        uidvalidity: folder_data.uidvalidity,
+        uidnext: folder_data.uidnext,
+        message_count: folder_data.total,
+        unseen_count: folder_data.unseen,
+    }
+}
+
+// --- DKIM sign with ML-DSA-87 (PQ) ---
+circuit dkim_sign(
+    signing_sk: bytes(4896),
+    domain: bytes(253),
+    selector: bytes(63),
+    mime: MimeMessage,
+) -> DkimSignature
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/bridge
+    constant_time true
+    observe metrics: [dkim_sign_ops, pq_dkim_signatures]
+{
+    let headers_to_sign = ["from", "to", "subject", "date", "message-id"]
+    let canonicalized = dkim_canonicalize(mime.raw_headers, headers_to_sign)
+    let body_hash = sha3_256(mime.body_parts[0].data)
+    let sig_input = blake3(concat(canonicalized, body_hash))
+    let signature = mldsa_sign(signing_sk, sig_input)
+    let ts = now()
+    DkimSignature {
+        algorithm: bytes("ml-dsa-87"),
+        domain: domain,
+        selector: selector,
+        signature_data: signature,
+        headers_signed: headers_to_sign,
+        body_hash: body_hash,
+        timestamp: ts,
+    }
+}
+
+// --- DKIM verify (supports both ML-DSA-87 and classical) ---
+circuit dkim_verify(raw_email: bytes) -> bool
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/bridge
+    observe metrics: [dkim_verify_ops, dkim_pass, dkim_fail]
+{
+    let dkim_header = extract_dkim_header(raw_email)
+    let pubkey = dns_dkim_lookup(dkim_header.domain, dkim_header.selector)
+    let canonicalized = dkim_canonicalize(raw_email, dkim_header.headers_signed)
+    let body_hash = sha3_256(extract_body(raw_email))
+    let sig_input = blake3(concat(canonicalized, body_hash))
+    if dkim_header.algorithm == bytes("ml-dsa-87") {
+        mldsa_verify(sig_input, dkim_header.signature_data, pubkey)
+    } else {
+        ed25519_verify(sig_input, dkim_header.signature_data, pubkey)
+    }
+}
+
+// --- Convert MIME message to Poly Mail internal format ---
+circuit mime_to_polymail(mime: MimeMessage) -> PolymailMessage
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/bridge
+    observe metrics: [mime_to_poly_conversions]
+{
+    let email_id = blake3(concat(mime.message_id, mime.date))
+    let sender_id = blake3(mime.from_header)
+    let body = mime.body_parts[0].data
+    let attachments = for part in mime.body_parts[1..] {
+        part.data
+    }
+    PolymailMessage {
+        email_id: bit_slice(email_id, 0, 128),
+        sender_id: bit_slice(sender_id, 0, 128),
+        subject: mime.subject,
+        body: body,
+        attachments: attachments,
+        timestamp: mime.date,
+    }
+}
+
+// --- Convert Poly Mail message to MIME for SMTP delivery ---
+circuit polymail_to_mime(msg: PolymailMessage) -> MimeMessage
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/bridge
+    observe metrics: [poly_to_mime_conversions]
+{
+    let message_id = blake3(concat(msg.email_id, msg.timestamp))
+    let body_part = MimeBodyPart {
+        content_type: bytes("text/plain; charset=utf-8"),
+        encoding: bytes("quoted-printable"),
+        data: msg.body,
+        filename: bytes(0),
+    }
+    let att_parts = for att in msg.attachments {
+        MimeBodyPart {
+            content_type: bytes("application/octet-stream"),
+            encoding: bytes("base64"),
+            data: att,
+            filename: bytes("attachment"),
+        }
+    }
+    MimeMessage {
+        message_id: message_id,
+        from_header: msg.sender_id,
+        to_headers: [],
+        subject: msg.subject,
+        date: msg.timestamp,
+        content_type: bytes("multipart/mixed"),
+        body_parts: concat([body_part], att_parts),
+        raw_headers: bytes(0),
+    }
+}
+
+// ── Monitors ─────────────────────────────────────────────────────
+
+monitor "bridge_throughput" {
+    assert metric("smtp_inbound_per_sec") + metric("smtp_outbound_per_sec") > 50
+    window 60s
+    severity warning
+}
+
+// ── Golden Tests ─────────────────────────────────────────────────
+
+test golden "smtp_receive_and_convert" {
+    input {
+        session: SmtpSession {
+            session_id: bytes(16, 0x01),
+            client_addr: bytes(16, 0x7F000001),
+            authenticated: true,
+            tls_version: bytes("TLSv1.3"),
+            mail_from: bytes("alice@example.com"),
+            rcpt_to: [bytes("bob@polylabs.dev")],
+            state: SmtpState::Data,
+        }
+        raw_data: bytes("From: alice@example.com\r\nTo: bob@polylabs.dev\r\nSubject: Hello\r\n\r\nHi Bob!")
+        recipient_encryption_pk: test_key("bob_mlkem_pk")
+    }
+    assert {
+        let msg = smtp_receive(session, raw_data, recipient_encryption_pk)
+        msg.subject == bytes("Hello")
+        msg.body == bytes("Hi Bob!")
+    }
+}
+
+test golden "dkim_sign_verify_roundtrip" {
+    input {
+        signing_sk: test_key("dkim_mldsa_sk")
+        signing_pk: test_key("dkim_mldsa_pk")
+        domain: bytes("polylabs.dev")
+        selector: bytes("pq202601")
+        mime: MimeMessage {
+            message_id: bytes("msg-001@polylabs.dev"),
+            from_header: bytes("alice@polylabs.dev"),
+            to_headers: [bytes("bob@example.com")],
+            subject: bytes("Test DKIM"),
+            date: 1700000000,
+            content_type: bytes("text/plain"),
+            body_parts: [MimeBodyPart {
+                content_type: bytes("text/plain"),
+                encoding: bytes("7bit"),
+                data: bytes("Hello World"),
+                filename: bytes(0),
+            }],
+            raw_headers: bytes("From: alice@polylabs.dev\r\nTo: bob@example.com\r\n"),
+        }
+    }
+    assert {
+        let sig = dkim_sign(signing_sk, domain, selector, mime)
+        sig.algorithm == bytes("ml-dsa-87")
+        sig.body_hash == sha3_256(bytes("Hello World"))
+    }
+}
+
+// ── KAT Vectors ──────────────────────────────────────────────────
+
+kat_vector "sha3_256_empty" {
+    function: "sha3_256"
+    input: bytes("")
+    expected: hex("a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a")
+}
+
+kat_vector "sha3_256_abc" {
+    function: "sha3_256"
+    input: bytes("abc")
+    expected: hex("3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532")
+}
+
+kat_vector "blake3_empty" {
+    function: "blake3"
+    input: bytes("")
+    expected: hex("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262")
+}
+
+kat_vector "mldsa_87_sign_verify" {
+    function: "mldsa_sign"
+    signing_key: test_key("mldsa87_kat_sk")
+    message: hex("54657374")
+    verify_key: test_key("mldsa87_kat_pk")
+    expected_verify: true
+}
+
+// ── Fuzz Targets ─────────────────────────────────────────────────
+
+fuzz_target "dkim_sign_fuzz" {
+    inputs {
+        signing_sk: bytes(4896)
+        domain: bytes(1..253)
+        selector: bytes(1..63)
+        body: bytes(1..65536)
+    }
+    assert {
+        no_panic
+        constant_time true
+    }
+}

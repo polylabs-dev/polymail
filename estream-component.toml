@@ -1,0 +1,44 @@
+[package]
+name = "polymail"
+version = "0.1.0"
+description = "PQ encrypted email with scatter-stored mailbox and SMTP bridge"
+license = "LicenseRef-PolyQuantum-Commercial"
+repository = "https://github.com/polylabs-dev/polymail"
+
+[publisher]
+id = "polylabs-dev"
+name = "Poly Labs"
+signing_key_id = "polylabs-prime-v1"
+
+[escir]
+api_version = "0.9.1"
+min_platform_version = "0.9.0"
+
+[dependencies]
+polykit = ">=0.2.0"
+
+[pricing]
+license_type = "per-invocation"
+share_price = "0.0004"
+private_price = "0.0006"
+
+[telemetry]
+schema_hash = "auto"
+
+[telemetry.metrics]
+messages_processed = "counter"
+spam_detections = "counter"
+encryption_ops = "counter"
+mailbox_operations = "counter"
+thread_creates = "counter"
+smtp_bridges = "counter"
+
+[telemetry.privacy]
+aggregate_window = "1h"
+cohort_min_size = 50
+noise_budget = "1.0"
+
+[component.include]
+circuits = ["circuits/fl/*.fl", "circuits/fl/graphs/*.fl"]
+tests = ["test_vectors/*.esz"]
+docs = ["docs/*.md"]

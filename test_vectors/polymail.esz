@@ -1,0 +1,126 @@
+{
+  "suite": "polymail_golden",
+  "version": "0.1.0",
+  "vectors": [
+    {
+      "name": "happy_path_send_encrypted_email",
+      "circuit": "polymail_process",
+      "input": {
+        "operation": "send",
+        "sender_spark_id": "spark:polymail:alice",
+        "recipient_spark_id": "spark:polymail:bob",
+        "subject_encrypted": true,
+        "body_size_bytes": 2048,
+        "attachments": 0,
+        "encrypt_algorithm": "ML-KEM-1024",
+        "sign_algorithm": "ML-DSA-87",
+        "scatter_mailbox": true
+      },
+      "expected_output": {
+        "status": "delivered",
+        "encrypted": true,
+        "signature_valid": true,
+        "scatter_stored": true,
+        "thread_created": true,
+        "metadata_encrypted": true,
+        "smtp_bridged": false
+      },
+      "expected_witness_tier": 2
+    },
+    {
+      "name": "edge_case_smtp_bridge_outbound",
+      "circuit": "polymail_smtp_bridge",
+      "input": {
+        "operation": "send_external",
+        "sender_spark_id": "spark:polymail:alice",
+        "recipient_email": "external@legacy-provider.com",
+        "body_size_bytes": 1024,
+        "encrypt_at_rest": true,
+        "opportunistic_tls": true,
+        "dkim_sign": true
+      },
+      "expected_output": {
+        "status": "bridged",
+        "smtp_delivered": true,
+        "dkim_signed": true,
+        "tls_used": true,
+        "sender_metadata_minimized": true,
+        "return_path_anonymized": true,
+        "scatter_copy_stored": true
+      },
+      "expected_witness_tier": 2
+    },
+    {
+      "name": "crypto_verify_mailbox_encryption",
+      "circuit": "polymail_encrypt",
+      "input": {
+        "operation": "encrypt_mailbox",
+        "mailbox_owner_spark_id": "spark:polymail:alice",
+        "message_count": 150,
+        "kem_algorithm": "ML-KEM-1024",
+        "hkdf_context": "poly-mail-v1",
+        "scatter_k": 3,
+        "scatter_n": 5
+      },
+      "expected_output": {
+        "all_messages_encrypted": true,
+        "per_message_keys": true,
+        "mailbox_index_encrypted": true,
+        "scatter_distributed": true,
+        "hkdf_context_matches": "poly-mail-v1",
+        "key_isolation_verified": true,
+        "forward_secrecy_per_message": true
+      },
+      "expected_witness_tier": 2
+    },
+    {
+      "name": "telemetry_isolation_blinded_metrics",
+      "circuit": "polymail_observe",
+      "input": {
+        "operation": "send",
+        "spark_id": "spark:polymail:charlie",
+        "messages_processed": 1,
+        "emit_metrics": ["messages_processed", "encryption_ops", "thread_creates"]
+      },
+      "expected_output": {
+        "metrics_emitted": 3,
+        "blinded_id_used": true,
+        "cross_product_leak": false,
+        "lex_namespace": "polymail",
+        "aggregate_window_ms": 3600000,
+        "cohort_min_met": true,
+        "noise_applied": true
+      },
+      "expected_witness_tier": 2
+    },
+    {
+      "name": "error_spam_detection_quarantine",
+      "circuit": "polymail_spam",
+      "input": {
+        "operation": "receive",
+        "source": "smtp_inbound",
+        "sender_reputation_score": 0.05,
+        "spf_pass": false,
+        "dkim_valid": false,
+        "dmarc_pass": false,
+        "body_heuristic_score": 0.92,
+        "recipient_spark_id": "spark:polymail:bob"
+      },
+      "expected_output": {
+        "status": "quarantined",
+        "spam_detected": true,
+        "spam_confidence": 0.95,
+        "quarantine_reason": ["spf_fail", "dkim_fail", "dmarc_fail", "high_heuristic_score"],
+        "recipient_notified": false,
+        "auto_delete_after_days": 30
+      },
+      "expected_witness_tier": 2
+    }
+  ],
+  "telemetry_isolation": {
+    "verify_blinded_id": true,
+    "verify_no_cross_product": true,
+    "verify_cohort_min": 50,
+    "verify_aggregate_window_ms": 3600000
+  }
+}

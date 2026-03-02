@@ -1,0 +1,566 @@
+/// Poly Mail Mailbox Graph — graph mailbox_registry
+/// Stratum graph storage + Cortex AI governance
+/// govern lex esn/global/org/polylabs/mail
+///
+/// Accounts, folders, labels, and contacts form a typed property graph.
+/// Replaces flat mailbox tables with relational model supporting
+/// hierarchical folders, multi-label assignment, and contact resolution.
+///
+/// Overlays: unread_count, folder_size, spam_score, thread_count
+/// Storage: CSR tiered (BRAM -> DDR -> NVMe)
+/// Cortex: field-level redact/obfuscate, on_write inference, anomaly alerts
+
+import polykit_identity
+import polykit_metering
+import polykit_governance
+
+// ── Data: Node types (Stratum store graph + Cortex) ─────────────
+
+data MailboxNode : app v1 {
+    mailbox_id: bytes(16),
+    owner_id: bytes(16),
+    display_name: bytes(128),
+    domain: bytes(253),
+    created_at: u64,
+    quota_bytes: u64,
+    tier: u8,
+}
+    store graph
+    govern lex esn/global/org/polylabs/mail
+    cortex {
+        obfuscate [owner_id]
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
+
+data FolderNode : app v1 {
+    folder_id: bytes(16),
+    name: bytes(128),
+    parent_folder_id: bytes(16),
+    sort_order: u32,
+    system_folder: u8,
+}
+    store graph
+    govern lex esn/global/org/polylabs/mail
+    cortex {
+        infer on_write
+    }
+
+data LabelNode : app v1 {
+    label_id: bytes(16),
+    name: bytes(64),
+    color: u32,
+    auto_apply_rule: bytes(256),
+}
+    store graph
+    govern lex esn/global/org/polylabs/mail
+    cortex {
+        infer on_read
+    }
+
+data MailContactNode : app v1 {
+    contact_id: bytes(16),
+    user_id: bytes(16),
+    display_name: bytes(128),
+    email_address: bytes(254),
+    signing_pubkey: bytes(2592),
+    encryption_pubkey: bytes(1568),
+    is_poly_user: bool,
+    last_contacted_at: u64,
+    trust_score: f32,
+}
+    store graph
+    govern lex esn/global/org/polylabs/mail
+    cortex {
+        redact [email_address]
+        obfuscate [display_name, user_id]
+        infer on_write
+        on_anomaly alert "mail-security"
+    }
+
+// ── Edge types ──────────────────────────────────────────────────
+
+type ContainsEdge = struct {
+    edge_id: bytes(16),
+    added_at: u64,
+}
+
+type LabeledWithEdge = struct {
+    edge_id: bytes(16),
+    labeled_at: u64,
+    applied_by: u8,
+}
+
+type SentToEdge = struct {
+    edge_id: bytes(16),
+    sent_at: u64,
+    message_count: u32,
+}
+
+type SharedWithEdge = struct {
+    edge_id: bytes(16),
+    shared_at: u64,
+    permission: u8,
+}
+
+// ── Graph definition ────────────────────────────────────────────
+
+graph mailbox_registry {
+    node MailboxNode
+    node FolderNode
+    node LabelNode
+    node MailContactNode
+    edge ContainsEdge
+    edge LabeledWithEdge
+    edge SentToEdge
+    edge SharedWithEdge
+
+    overlay unread_count: u32 bitmask delta_curate
+    overlay folder_size: u64 bitmask delta_curate
+    overlay spam_score: f32 curate delta_curate
+    overlay thread_count: u32 bitmask delta_curate
+    overlay contact_frequency: u32 bitmask delta_curate
+    overlay storage_used: u64 bitmask delta_curate
+
+    storage csr {
+        hot @bram,
+        warm @ddr,
+        cold @nvme,
+    }
+
+    ai_feed mailbox_anomaly
+    ai_feed contact_trust_scoring
+
+    observe mailbox_registry: [unread_count, spam_score, thread_count, storage_used] threshold: {
+        anomaly_score 0.85
+        baseline_window 120
+    }
+}
+
+series mailbox_series: mailbox_registry
+    merkle_chain true
+    lattice_imprint true
+    witness_attest true
+
+// ── Circuits: Mailbox lifecycle ─────────────────────────────────
+
+circuit create_mailbox(
+    graph_id: bytes(32),
+    owner_id: bytes(16),
+    display_name: bytes(128),
+    domain: bytes(253),
+    tier: u8,
+) -> MailboxNode
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [mailboxes_created, tier]
+    invariant "owner_exists" { owner_id != bytes(16) }
+    meters [compute_cycles, storage]
+    wasm_abi [random_bytes, eslite_insert, now]
+    test golden "create_free_mailbox" {
+        let node = create_mailbox(
+            bytes(32, 0x01),
+            bytes(16, 0xAA),
+            "alice@polylabs.dev",
+            "polylabs.dev",
+            0
+        )
+        assert node.tier == 0
+        assert node.quota_bytes == 524288000
+    }
+{
+    let mailbox_id = random_bytes(16)
+    let ts = now()
+    let quota = match tier {
+        0 => 524288000,
+        1 => 5368709120,
+        2 => 53687091200,
+        _ => 0,
+    }
+    let node = MailboxNode {
+        mailbox_id: mailbox_id,
+        owner_id: owner_id,
+        display_name: display_name,
+        domain: domain,
+        created_at: ts,
+        quota_bytes: quota,
+        tier: tier,
+    }
+    graph_insert(mailbox_registry, node)
+    overlay_set(mailbox_registry, mailbox_id, "storage_used", 0)
+
+    let system_folders = ["Inbox", "Sent", "Drafts", "Trash", "Spam", "Archive"]
+    for (i, name) in enumerate(system_folders) {
+        let folder = FolderNode {
+            folder_id: random_bytes(16),
+            name: name,
+            parent_folder_id: bytes(16),
+            sort_order: i,
+            system_folder: 1,
+        }
+        graph_insert(mailbox_registry, folder)
+        graph_connect(mailbox_registry, node, folder, ContainsEdge {
+            edge_id: random_bytes(16),
+            added_at: ts,
+        })
+    }
+
+    let default_labels = [
+        ("Important", 0xFF0000),
+        ("Personal", 0x00AA00),
+        ("Work", 0x0055FF),
+        ("Updates", 0xFFAA00),
+    ]
+    for (name, color) in default_labels {
+        let label = LabelNode {
+            label_id: random_bytes(16),
+            name: name,
+            color: color,
+            auto_apply_rule: bytes(0),
+        }
+        graph_insert(mailbox_registry, label)
+        graph_connect(mailbox_registry, node, label, ContainsEdge {
+            edge_id: random_bytes(16),
+            added_at: ts,
+        })
+    }
+
+    node
+}
+
+circuit create_folder(
+    graph_id: bytes(32),
+    mailbox_id: bytes(16),
+    name: bytes(128),
+    parent_folder_id: bytes(16),
+) -> FolderNode
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [folders_created]
+    invariant "name_nonempty" { len(name) > 0 }
+    meters [compute_cycles, storage]
+    wasm_abi [random_bytes, now]
+{
+    let folder_id = random_bytes(16)
+    let ts = now()
+    let sort = graph_query(mailbox_registry, mailbox_id, "max_sort_order") + 1
+    let folder = FolderNode {
+        folder_id: folder_id,
+        name: name,
+        parent_folder_id: parent_folder_id,
+        sort_order: sort,
+        system_folder: 0,
+    }
+    graph_insert(mailbox_registry, folder)
+    let mailbox = graph_lookup(mailbox_registry, mailbox_id)
+    graph_connect(mailbox_registry, mailbox, folder, ContainsEdge {
+        edge_id: random_bytes(16),
+        added_at: ts,
+    })
+    folder
+}
+
+circuit move_to_folder(
+    graph_id: bytes(32),
+    email_id: bytes(16),
+    source_folder_id: bytes(16),
+    target_folder_id: bytes(16),
+) -> bool
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [folder_moves, unread_count_updates]
+    invariant "different_folders" { source_folder_id != target_folder_id }
+    meters [compute_cycles]
+    wasm_abi [now]
+{
+    let ts = now()
+    let email = graph_lookup(mailbox_registry, email_id)
+    let source = graph_lookup(mailbox_registry, source_folder_id)
+    let target = graph_lookup(mailbox_registry, target_folder_id)
+    graph_disconnect(mailbox_registry, source, email)
+    graph_connect(mailbox_registry, target, email, ContainsEdge {
+        edge_id: random_bytes(16),
+        added_at: ts,
+    })
+    overlay_decrement(mailbox_registry, source_folder_id, "folder_size", 1)
+    overlay_increment(mailbox_registry, target_folder_id, "folder_size", 1)
+    true
+}
+
+// ── Circuits: Labels ────────────────────────────────────────────
+
+circuit create_label(
+    graph_id: bytes(32),
+    mailbox_id: bytes(16),
+    name: bytes(64),
+    color: u32,
+    auto_apply_rule: bytes(256),
+) -> LabelNode
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [labels_created, auto_rules_set]
+    meters [compute_cycles, storage]
+    wasm_abi [random_bytes, now]
+{
+    let label = LabelNode {
+        label_id: random_bytes(16),
+        name: name,
+        color: color,
+        auto_apply_rule: auto_apply_rule,
+    }
+    graph_insert(mailbox_registry, label)
+    let mailbox = graph_lookup(mailbox_registry, mailbox_id)
+    graph_connect(mailbox_registry, mailbox, label, ContainsEdge {
+        edge_id: random_bytes(16),
+        added_at: now(),
+    })
+    label
+}
+
+circuit apply_label(
+    graph_id: bytes(32),
+    target_id: bytes(16),
+    label_id: bytes(16),
+    applied_by: u8,
+) -> bool
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [labels_applied, auto_applied, user_applied]
+    meters [compute_cycles]
+    wasm_abi [now]
+{
+    let ts = now()
+    let target = graph_lookup(mailbox_registry, target_id)
+    let label = graph_lookup(mailbox_registry, label_id)
+    graph_connect(mailbox_registry, target, label, LabeledWithEdge {
+        edge_id: random_bytes(16),
+        labeled_at: ts,
+        applied_by: applied_by,
+    })
+    true
+}
+
+// ── Circuits: Contacts ──────────────────────────────────────────
+
+circuit add_contact(
+    graph_id: bytes(32),
+    mailbox_id: bytes(16),
+    display_name: bytes(128),
+    email_address: bytes(254),
+    signing_pubkey: bytes(2592),
+    encryption_pubkey: bytes(1568),
+    is_poly_user: bool,
+) -> MailContactNode
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [contacts_added, poly_contacts, external_contacts]
+    meters [compute_cycles, storage]
+    wasm_abi [random_bytes, now]
+    test golden "add_poly_contact" {
+        let c = add_contact(
+            bytes(32, 0x01),
+            bytes(16, 0xAA),
+            "Bob Smith",
+            "bob@polylabs.dev",
+            bytes(2592, 0x00),
+            bytes(1568, 0x00),
+            true
+        )
+        assert c.is_poly_user == true
+        assert c.trust_score == 1.0
+    }
+{
+    let contact_id = random_bytes(16)
+    let ts = now()
+    let trust = if is_poly_user { 1.0 } else { 0.5 }
+    let contact = MailContactNode {
+        contact_id: contact_id,
+        user_id: bytes(16),
+        display_name: display_name,
+        email_address: email_address,
+        signing_pubkey: signing_pubkey,
+        encryption_pubkey: encryption_pubkey,
+        is_poly_user: is_poly_user,
+        last_contacted_at: ts,
+        trust_score: trust,
+    }
+    graph_insert(mailbox_registry, contact)
+    let mailbox = graph_lookup(mailbox_registry, mailbox_id)
+    graph_connect(mailbox_registry, mailbox, contact, ContainsEdge {
+        edge_id: random_bytes(16),
+        added_at: ts,
+    })
+    overlay_set(mailbox_registry, contact_id, "contact_frequency", 0)
+    contact
+}
+
+circuit resolve_contact(
+    graph_id: bytes(32),
+    mailbox_id: bytes(16),
+    email_address: bytes(254),
+) -> MailContactNode
+    lex esn/global/org/polylabs/mail
+    status production
+    precision B
+    observe metrics: [contact_lookups, contact_misses, directory_hits]
+    wasm_abi [eslite_query]
+{
+    let contacts = graph_query(mailbox_registry, mailbox_id, "contacts")
+    for c in contacts {
+        if c.email_address == email_address {
+            return c
+        }
+    }
+    let remote = eslite_query("directory", email_address)
+    if remote != null {
+        add_contact(
+            graph_id,
+            mailbox_id,
+            remote.display_name,
+            email_address,
+            remote.signing_pubkey,
+            remote.encryption_pubkey,
+            true,
+        )
+    } else {
+        MailContactNode {
+            contact_id: blake3(email_address),
+            user_id: bytes(16),
+            display_name: email_address,
+            email_address: email_address,
+            signing_pubkey: bytes(2592),
+            encryption_pubkey: bytes(1568),
+            is_poly_user: false,
+            last_contacted_at: 0,
+            trust_score: 0.0,
+        }
+    }
+}
+
+// ── Circuits: Sharing ───────────────────────────────────────────
+
+circuit share_folder(
+    graph_id: bytes(32),
+    folder_id: bytes(16),
+    target_mailbox_id: bytes(16),
+    permission: u8,
+) -> bool
+    lex esn/global/org/polylabs/mail
+    status production
+    precision C
+    povc true
+    observe metrics: [folders_shared, permission_level]
+    invariant "valid_permission" { permission <= 2 }
+    meters [compute_cycles]
+    wasm_abi [random_bytes, now]
+{
+    let ts = now()
+    let folder = graph_lookup(mailbox_registry, folder_id)
+    let target = graph_lookup(mailbox_registry, target_mailbox_id)
+    graph_connect(mailbox_registry, folder, target, SharedWithEdge {
+        edge_id: random_bytes(16),
+        shared_at: ts,
+        permission: permission,
+    })
+    true
+}
+
+// ── Circuits: Quota enforcement ─────────────────────────────────
+
+circuit check_quota(
+    graph_id: bytes(32),
+    mailbox_id: bytes(16),
+    incoming_size: u64,
+) -> bool
+    lex esn/global/org/polylabs/mail
+    status production
+    precision B
+    observe metrics: [quota_checks, quota_exceeded, utilization_pct]
+    meters [compute_cycles]
+{
+    let mailbox = graph_lookup(mailbox_registry, mailbox_id)
+    let used = overlay_get(mailbox_registry, mailbox_id, "storage_used")
+    if used + incoming_size > mailbox.quota_bytes {
+        false
+    } else {
+        overlay_increment(mailbox_registry, mailbox_id, "storage_used", incoming_size)
+        true
+    }
+}
+
+// ── Circuits: Quantum state snapshot ────────────────────────────
+
+circuit snapshot_mailbox(
+    graph_id: bytes(32),
+    mailbox_id: bytes(16),
+) -> bytes(32)
+    lex esn/global/org/polylabs/mail
+    status production
+    precision B
+    povc true
+    observe metrics: [snapshots_taken, snapshot_size_bytes]
+    meters [compute_cycles, storage]
+    wasm_abi [now, blake3_hash]
+{
+    let ts = now()
+    let subgraph = graph_extract_subgraph(mailbox_registry, mailbox_id, 3)
+    let overlays = overlay_snapshot(mailbox_registry, mailbox_id)
+    let state = concat(serialize(subgraph), serialize(overlays), to_bytes(ts))
+    let hash = blake3_hash(state)
+    series_append(mailbox_series, hash, ts)
+    hash
+}
+
+// ── Streams ─────────────────────────────────────────────────────
+
+stream mailbox_mutations: event<MailboxNode>
+    retention 365d
+    consumers [governance, audit, streamsight, mail_team]
+
+stream contact_trust_events: event<MailContactNode>
+    retention 90d
+    consumers [streamsight, cortex_trust_model]
+
+stream quota_events: event<MailboxNode>
+    retention 30d
+    consumers [metering, billing, streamsight]
+
+// ── Monitors ─────────────────────────────────────────────────────
+
+monitor "mailbox_operations_rate" {
+    assert metric("mailboxes_created_per_sec") + metric("folders_created_per_sec") > 0
+    window 60s
+    severity warning
+}
+
+monitor "quota_utilization" {
+    assert metric("quota_exceeded") < 10
+    window 300s
+    severity critical
+}
+
+// ── KAT Vectors ──────────────────────────────────────────────────
+
+kat_vector "blake3_empty" {
+    function: "blake3"
+    input: bytes("")
+    expected: hex("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262")
+}
+
+kat_vector "blake3_abc" {
+    function: "blake3"
+    input: bytes("abc")
+    expected: hex("6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85")
+}

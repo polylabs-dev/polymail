@@ -1,0 +1,325 @@
+// Poly Mail Encrypt — E2E email encryption with ML-KEM-1024
+//
+// Multi-recipient envelope encryption: each email is encrypted with a
+// random AES-256-GCM content key, then that key is wrapped per-recipient
+// via ML-KEM-1024. Attachments use independent content keys.
+//
+// Key hierarchy:
+//   email_content_key (random 32 bytes)
+//     |-- AES-256-GCM encrypt(body)
+//     +-- per-recipient: ML-KEM-1024 encaps(email_content_key, recipient_pk)
+//
+//   attachment_key (random 32 bytes per attachment)
+//     +-- AES-256-GCM encrypt(attachment_data)
+
+import polykit_identity
+import polykit_metering
+
+type EmailKey = bytes(32)
+type AttachmentKey = bytes(32)
+type Nonce = bytes(12)
+
+type RecipientKeyBundle = struct {
+    recipient_id: bytes(16),
+    encryption_pubkey: bytes(1568),
+    wrapped_key_ciphertext: bytes(1568),
+}
+
+type EncryptedEmail = struct {
+    email_id: bytes(16),
+    sender_id: bytes(16),
+    nonce: Nonce,
+    encrypted_body: bytes,
+    body_tag: bytes(16),
+    recipient_bundles: [RecipientKeyBundle],
+    attachment_keys_encrypted: [bytes],
+    content_hash: bytes(32),
+    sender_signature: bytes(4627),
+}
+
+type DecryptedEmail = struct {
+    email_id: bytes(16),
+    sender_id: bytes(16),
+    body: bytes,
+    verified: bool,
+}
+
+type EncryptedAttachment = struct {
+    attachment_id: bytes(16),
+    nonce: Nonce,
+    encrypted_data: bytes,
+    tag: bytes(16),
+    content_hash: bytes(32),
+}
+
+// --- Encrypt email body for multiple recipients ---
+circuit encrypt_email(
+    sender_sk: bytes(4896),
+    sender_id: bytes(16),
+    body: bytes,
+    recipient_pubkeys: [RecipientKeyBundle],
+) -> EncryptedEmail
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/encrypt
+    constant_time true
+    observe metrics: [emails_encrypted, encrypt_latency_ms, recipient_key_wraps]
+    monitor "encrypt_latency" { encrypt_latency_ms < 200 }
+    invariant "body_nonempty" { len(body) > 0 }
+    invariant "at_least_one_recipient" { len(recipient_pubkeys) >= 1 }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [random_bytes, now]
+{
+    let email_id = random_bytes(16)
+    let email_key = random_bytes(32)
+    let nonce = random_bytes(12)
+    let (encrypted_body, tag) = aes_gcm_encrypt(email_key, nonce, body, email_id)
+    let content_hash = sha3_256(body)
+    let bundles = parallel for r in recipient_pubkeys {
+        wrap_recipient_key(email_key, r.encryption_pubkey, r.recipient_id)
+    }
+    let sig_payload = blake3(concat(email_id, content_hash, nonce))
+    let sender_signature = mldsa_sign(sender_sk, sig_payload)
+    EncryptedEmail {
+        email_id: email_id,
+        sender_id: sender_id,
+        nonce: nonce,
+        encrypted_body: encrypted_body,
+        body_tag: tag,
+        recipient_bundles: bundles,
+        attachment_keys_encrypted: [],
+        content_hash: content_hash,
+        sender_signature: sender_signature,
+    }
+}
+
+// --- Decrypt email body as a recipient ---
+circuit decrypt_email(
+    recipient_sk: bytes(3168),
+    sender_pk: bytes(2592),
+    email: EncryptedEmail,
+    recipient_id: bytes(16),
+) -> DecryptedEmail
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/encrypt
+    constant_time true
+    observe metrics: [emails_decrypted, decrypt_failures, signature_verifications]
+    monitor "decrypt_latency" { decrypt_latency_ms < 150 }
+    invariant "recipient_present" { find_bundle(email.recipient_bundles, recipient_id) != null }
+    meters [compute_cycles, memory_bytes]
+{
+    let bundle = find_bundle(email.recipient_bundles, recipient_id)
+    let email_key = unwrap_recipient_key(recipient_sk, bundle.wrapped_key_ciphertext)
+    let body = aes_gcm_decrypt(email_key, email.nonce, email.encrypted_body, email.email_id, email.body_tag)
+    let content_hash = sha3_256(body)
+    assert content_hash == email.content_hash
+    let sig_payload = blake3(concat(email.email_id, content_hash, email.nonce))
+    let verified = mldsa_verify(sig_payload, email.sender_signature, sender_pk)
+    DecryptedEmail {
+        email_id: email.email_id,
+        sender_id: email.sender_id,
+        body: body,
+        verified: verified,
+    }
+}
+
+// --- Encrypt a single attachment with an independent key ---
+circuit encrypt_attachment(attachment_data: bytes) -> (EncryptedAttachment, AttachmentKey)
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/encrypt
+    constant_time true
+    observe metrics: [attachments_encrypted, attachment_bytes_encrypted]
+    invariant "data_nonempty" { len(attachment_data) > 0 }
+    wasm_abi [random_bytes]
+{
+    let att_key = random_bytes(32)
+    let att_id = random_bytes(16)
+    let nonce = random_bytes(12)
+    let (encrypted_data, tag) = aes_gcm_encrypt(att_key, nonce, attachment_data, att_id)
+    let content_hash = sha3_256(attachment_data)
+    (EncryptedAttachment {
+        attachment_id: att_id,
+        nonce: nonce,
+        encrypted_data: encrypted_data,
+        tag: tag,
+        content_hash: content_hash,
+    }, att_key)
+}
+
+// --- Decrypt a single attachment ---
+circuit decrypt_attachment(att_key: AttachmentKey, attachment: EncryptedAttachment) -> bytes
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/encrypt
+    constant_time true
+    observe metrics: [attachments_decrypted, attachment_bytes_decrypted]
+{
+    let data = aes_gcm_decrypt(att_key, attachment.nonce, attachment.encrypted_data, attachment.attachment_id, attachment.tag)
+    let hash = sha3_256(data)
+    assert hash == attachment.content_hash
+    data
+}
+
+// --- Wrap email content key for a single recipient via ML-KEM-1024 ---
+circuit wrap_recipient_key(email_key: EmailKey, recipient_pk: bytes(1568), recipient_id: bytes(16)) -> RecipientKeyBundle
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/encrypt
+    constant_time true
+    observe metrics: [key_wraps]
+{
+    let kem = mlkem_encaps(recipient_pk)
+    let wrapping_key = blake3(kem.shared_secret)
+    let nonce = bit_slice(sha3_256(concat(recipient_id, email_key)), 0, 96)
+    let (wrapped, _tag) = aes_gcm_encrypt(wrapping_key, nonce, email_key, recipient_id)
+    RecipientKeyBundle {
+        recipient_id: recipient_id,
+        encryption_pubkey: recipient_pk,
+        wrapped_key_ciphertext: kem.ciphertext,
+    }
+}
+
+// --- Unwrap email content key as the recipient ---
+circuit unwrap_recipient_key(recipient_sk: bytes(3168), wrapped_ciphertext: bytes(1568)) -> EmailKey
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/encrypt
+    constant_time true
+    observe metrics: [key_unwraps, unwrap_failures]
+{
+    let shared_secret = mlkem_decaps(recipient_sk, wrapped_ciphertext)
+    let email_key = blake3(shared_secret)
+    email_key
+}
+
+// ── Monitors ─────────────────────────────────────────────────────
+
+monitor "email_encrypt_throughput" {
+    assert metric("emails_encrypted_per_sec") > 50
+    window 60s
+    severity critical
+}
+
+// ── Golden Tests ─────────────────────────────────────────────────
+
+test golden "encrypt_decrypt_email_roundtrip" {
+    input {
+        plaintext: bytes("Subject: Test\r\nFrom: alice@polylabs.dev\r\n\r\nHello Bob!")
+        sender_sk: test_key("sender_mldsa_sk")
+        sender_pk: test_key("sender_mldsa_pk")
+        sender_id: bytes(16, 0xAA)
+        recipient_sk: test_key("recipient_mlkem_sk")
+        recipient_pk: test_key("recipient_mlkem_pk")
+        recipient_id: bytes(16, 0xBB)
+    }
+    assert {
+        let encrypted = encrypt_email(sender_sk, sender_id, plaintext, [
+            RecipientKeyBundle {
+                recipient_id: recipient_id,
+                encryption_pubkey: recipient_pk,
+                wrapped_key_ciphertext: bytes(1568),
+            }
+        ])
+        encrypted.encrypted_body != plaintext
+        encrypted.content_hash == sha3_256(plaintext)
+        let decrypted = decrypt_email(recipient_sk, sender_pk, encrypted, recipient_id)
+        decrypted.body == plaintext
+        decrypted.verified == true
+    }
+}
+
+test golden "encrypt_decrypt_attachment_roundtrip" {
+    input {
+        attachment_data: bytes("This is a test PDF content blob for roundtrip verification.")
+    }
+    assert {
+        let (encrypted_att, att_key) = encrypt_attachment(attachment_data)
+        encrypted_att.encrypted_data != attachment_data
+        encrypted_att.content_hash == sha3_256(attachment_data)
+        let decrypted = decrypt_attachment(att_key, encrypted_att)
+        decrypted == attachment_data
+    }
+}
+
+// ── KAT Vectors ──────────────────────────────────────────────────
+
+kat_vector "aes_gcm_256_nist_empty" {
+    function: "aes_gcm_encrypt"
+    key: hex("0000000000000000000000000000000000000000000000000000000000000000")
+    nonce: hex("000000000000000000000000")
+    plaintext: bytes("")
+    aad: bytes("")
+    expected_ciphertext: bytes("")
+    expected_tag: hex("530f8afbc74536b9a963b4f1c4cb738b")
+}
+
+kat_vector "aes_gcm_256_nist_decrypt_empty" {
+    function: "aes_gcm_decrypt"
+    key: hex("0000000000000000000000000000000000000000000000000000000000000000")
+    nonce: hex("000000000000000000000000")
+    ciphertext: bytes("")
+    aad: bytes("")
+    tag: hex("530f8afbc74536b9a963b4f1c4cb738b")
+    expected_plaintext: bytes("")
+}
+
+kat_vector "sha3_256_empty" {
+    function: "sha3_256"
+    input: bytes("")
+    expected: hex("a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a")
+}
+
+kat_vector "sha3_256_abc" {
+    function: "sha3_256"
+    input: bytes("abc")
+    expected: hex("3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532")
+}
+
+kat_vector "mlkem_1024_roundtrip" {
+    function: "mlkem_encaps_decaps"
+    seed: hex("404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f")
+    expected: roundtrip_ok
+    shared_secret_len: 32
+    ciphertext_len: 1568
+}
+
+kat_vector "blake3_empty" {
+    function: "blake3"
+    input: bytes("")
+    expected: hex("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262")
+}
+
+// ── Fuzz Targets ─────────────────────────────────────────────────
+
+fuzz_target "encrypt_email_fuzz" {
+    inputs {
+        body: bytes(1..65536)
+        sender_sk: bytes(4896)
+        nonce: bytes(12)
+    }
+    assert {
+        no_panic
+        constant_time true
+    }
+}
+
+fuzz_target "decrypt_email_fuzz" {
+    inputs {
+        encrypted_body: bytes(1..65536)
+        recipient_sk: bytes(3168)
+        nonce: bytes(12)
+        tag: bytes(16)
+    }
+    assert {
+        no_panic
+        constant_time true
+    }
+}
+
+fuzz_target "mlkem_wrap_unwrap_fuzz" {
+    inputs {
+        email_key: bytes(32)
+        recipient_pk: bytes(1568)
+        recipient_id: bytes(16)
+    }
+    assert {
+        no_panic
+        constant_time true
+    }
+}

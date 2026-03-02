@@ -2,7 +2,7 @@
 
 **Version**: 2.0
 **Date**: February 2026
-**Platform**: eStream v0.8.3
+**Platform**: eStream v0.9.1
 **Upstream**: PolyKit v0.3.0, eStream graph/DAG constructs
 **Build Pipeline**: FastLang (.fl) → ESCIR → Rust/WASM codegen → .escd
 
@@ -75,53 +75,55 @@ Enterprise admins can **opt-in** to cross-product visibility via an explicit lex
 
 ### Mailbox Registry (`polymail_mailbox_graph.fl`)
 
-Accounts, folders, labels, and contacts form a graph. This replaces flat mailbox tables with a relational model supporting hierarchical folders, multi-label assignment, and contact resolution.
+Accounts, folders, labels, and contacts form a Stratum graph with Cortex AI governance. Node types use `data` declarations with `store graph` and field-level visibility controls. Replaces flat mailbox tables with a relational model supporting hierarchical folders, multi-label assignment, contact resolution, quota enforcement, and folder sharing.
 
 ```fastlang
-type MailboxNode = struct {
+data MailboxNode : app v1 {
     mailbox_id: bytes(16),
     owner_id: bytes(16),
     display_name: bytes(128),
     domain: bytes(253),
     created_at: u64,
+    quota_bytes: u64,
+    tier: u8,
 }
+    store graph
+    govern lex esn/global/org/polylabs/mail
+    cortex {
+        obfuscate [owner_id]
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
 
-type FolderNode = struct {
-    folder_id: bytes(16),
-    name: bytes(128),
-    parent_folder_id: bytes(16),
-    sort_order: u32,
-    system_folder: u8,
-}
+data FolderNode : app v1 { ... }
+    store graph
+    govern lex esn/global/org/polylabs/mail
+    cortex { infer on_write }
 
-type LabelNode = struct {
-    label_id: bytes(16),
-    name: bytes(64),
-    color: u32,
-}
+data LabelNode : app v1 { ... }
+    store graph
+    govern lex esn/global/org/polylabs/mail
+    cortex { infer on_read }
 
-type MailContactNode = struct {
+data MailContactNode : app v1 {
     contact_id: bytes(16),
+    user_id: bytes(16),
     display_name: bytes(128),
     email_address: bytes(254),
     signing_pubkey: bytes(2592),
     encryption_pubkey: bytes(1568),
     is_poly_user: bool,
     last_contacted_at: u64,
+    trust_score: f32,
 }
-
-type ContainsEdge = struct {
-    added_at: u64,
-}
-
-type LabeledWithEdge = struct {
-    labeled_at: u64,
-}
-
-type SentToEdge = struct {
-    sent_at: u64,
-    message_count: u32,
-}
+    store graph
+    govern lex esn/global/org/polylabs/mail
+    cortex {
+        redact [email_address]
+        obfuscate [display_name, user_id]
+        infer on_write
+        on_anomaly alert "mail-security"
+    }
 
 graph mailbox_registry {
     node MailboxNode
@@ -131,11 +133,14 @@ graph mailbox_registry {
     edge ContainsEdge
     edge LabeledWithEdge
     edge SentToEdge
+    edge SharedWithEdge
 
     overlay unread_count: u32 bitmask delta_curate
     overlay folder_size: u64 bitmask delta_curate
     overlay spam_score: f32 curate delta_curate
     overlay thread_count: u32 bitmask delta_curate
+    overlay contact_frequency: u32 bitmask delta_curate
+    overlay storage_used: u64 bitmask delta_curate
 
     storage csr {
         hot @bram,
@@ -143,9 +148,10 @@ graph mailbox_registry {
         cold @nvme,
     }
 
-    ai_feed spam_detection
+    ai_feed mailbox_anomaly
+    ai_feed contact_trust_scoring
 
-    observe mailbox_registry: [unread_count, spam_score, thread_count] threshold: {
+    observe mailbox_registry: [unread_count, spam_score, thread_count, storage_used] threshold: {
         anomaly_score 0.85
         baseline_window 120
     }
@@ -157,77 +163,85 @@ series mailbox_series: mailbox_registry
     witness_attest true
 ```
 
-Key circuits: `create_mailbox`, `create_folder`, `move_to_folder`, `apply_label`, `add_contact`, `resolve_contact`.
+Key circuits: `create_mailbox`, `create_folder`, `move_to_folder`, `create_label`, `apply_label`, `add_contact`, `resolve_contact`, `share_folder`, `check_quota`, `snapshot_mailbox`.
 
 ### Email Thread DAG (`polymail_thread_dag.fl`)
 
-Emails form a DAG within each conversation thread. Replies create parent edges. Forwards branch. This enables threading, ordering, and causal consistency for offline/CRDT scenarios.
+Emails form a Stratum DAG with Cortex AI governance, ML-DSA-87 signing, merkle CSR storage, and PoVC attestation. Replies create parent edges. Forwards branch. Cortex classifies incoming email on write (spam, phishing, priority) and stores suggestions for inbox intelligence.
 
 ```fastlang
-type EmailNode = struct {
+data EmailNode : app v1 {
     email_id: bytes(16),
     thread_id: bytes(16),
     sender_id: bytes(16),
-    subject: bytes(998),
+    recipient_ids: list<bytes(16)>,
+    subject_preview: bytes(256),
+    content_hash: bytes(32),
     timestamp: u64,
-    encrypted_body_hash: bytes(32),
+    in_reply_to: bytes(16),
     attachment_count: u8,
     size_bytes: u64,
+    scatter_manifest: bytes(64),
+    pq_signature: bytes(4627),
 }
-
-type ReplyToEdge = struct {
-    reply_type: u8,
-}
-
-type ForwardEdge = struct {
-    forwarded_at: u64,
-    forward_note_hash: bytes(32),
-}
+    store dag
+    govern lex esn/global/org/polylabs/mail
+    cortex {
+        redact [content_hash, subject_preview]
+        obfuscate [sender_id, recipient_ids]
+        infer on_write
+        on_anomaly alert "mail-security"
+        on_classification auto_apply
+        on_suggestion store "cortex/mail/suggestions"
+    }
 
 state_machine email_lifecycle {
     initial DRAFT
     persistence wal
-    terminal [SPAM, ARCHIVED, DELETED]
+    terminal [SPAM, ARCHIVED, DELETED, PURGED]
     li_anomaly_detection true
 
-    DRAFT -> SENDING when user_send
+    DRAFT -> QUEUED when user_send
+    QUEUED -> SENDING when relay_picked_up
     SENDING -> SENT when relay_confirmed
-    SENDING -> DRAFT when send_failed guard retry_limit_reached
+    SENDING -> BOUNCED when send_failed guard retry_limit_reached
     SENT -> DELIVERED when recipient_acked
     DELIVERED -> READ when recipient_read
-    READ -> ARCHIVED when user_archive
-    DELIVERED -> ARCHIVED when user_archive
-    SENT -> ARCHIVED when user_archive
-    READ -> DELETED when user_delete
-    DELIVERED -> DELETED when user_delete
-    SENT -> DELETED when user_delete
-    DRAFT -> DELETED when user_delete
-    DELIVERED -> SPAM when spam_detected
-    SENT -> SPAM when spam_detected
-    SPAM -> DELETED when user_delete
-    SPAM -> DELIVERED when user_not_spam
-    ARCHIVED -> DELETED when user_delete
+    ... (full transitions in .fl source)
+    DELETED -> PURGED when retention_expired guard past_retention_window
 }
 
 dag email_thread {
     node EmailNode
     edge ReplyToEdge
     edge ForwardEdge
+    edge AttachmentRefEdge
 
     enforce acyclic
+    sign ml_dsa_87
 
     overlay read_status: u8 curate delta_curate
-    overlay star: bool curate
+    overlay star: bool curate delta_curate
     overlay label_mask: u64 bitmask delta_curate
-    overlay attachment_count: u8 bitmask
+    overlay spam_verdict: u8 curate delta_curate
+    overlay priority_score: f32 curate delta_curate
+    overlay attachment_count: u8 bitmask delta_curate
 
-    storage csr {
+    storage merkle_csr {
         hot @bram,
         warm @ddr,
         cold @nvme,
     }
 
-    observe email_thread: [read_status, label_mask] threshold: {
+    attest povc {
+        witness threshold(2, 3)
+    }
+
+    ai_feed email_classification
+    ai_feed thread_priority_scoring
+    ai_feed phishing_detection
+
+    observe email_thread: [read_status, label_mask, spam_verdict, priority_score] threshold: {
         anomaly_score 0.8
         baseline_window 60
     }
@@ -239,7 +253,70 @@ series email_series: email_thread
     witness_attest true
 ```
 
-Key circuits: `compose_draft`, `send_email`, `receive_email`, `mark_read`, `star_email`, `archive_email`, `delete_email`, `move_to_spam`, `mark_not_spam`.
+Key circuits: `compose_draft`, `send_email`, `receive_email`, `mark_read`, `star_email`, `set_label_mask`, `archive_email`, `delete_email`, `move_to_spam`, `mark_not_spam`, `forward_email`, `get_thread`, `get_thread_participants`, `get_cortex_suggestions`, `apply_cortex_suggestion`, `snapshot_thread`.
+
+---
+
+## Stratum & Cortex Integration
+
+Poly Mail fully composes Stratum storage and Cortex AI governance via the v0.10.0 `data` declaration pattern (`store graph/dag`, `govern lex`, `cortex {}`).
+
+### Stratum Storage Bindings
+
+| Construct | Storage Type | Purpose |
+|-----------|-------------|---------|
+| `mailbox_registry` | `store graph` + CSR tiered | Accounts, folders, labels, contacts. Hot overlays (unread_count, spam_score) in BRAM for sub-microsecond reads. Warm node data in DDR. Cold archived mailboxes on NVMe. |
+| `email_thread` | `store dag` + merkle CSR | Conversation threading with acyclic enforcement. Merkle CSR provides tamper-evident storage. ML-DSA-87 signing on every DAG mutation. PoVC attestation with 2-of-3 witness threshold. |
+| Email content blobs | KV (scatter-CAS) | Encrypted email bodies stored via scatter-CAS (`scatter_manifest` on EmailNode). Content-addressed, erasure-coded across providers. Not in the graph/DAG — referenced by `content_hash`. |
+
+**Tiering policy**: All graph/DAG storage uses `{ hot @bram, warm @ddr, cold @nvme }`. Overlay data (counters, scores, bitmasks) stays hot. Node/edge structural data is warm. Nodes in terminal states (DELETED, PURGED, ARCHIVED >90d) migrate to cold.
+
+### Cortex Visibility Policies
+
+Field-level visibility is enforced per data type via Cortex declarations. These policies apply to all consumers (StreamSight, ai_feed models, audit, lex governance) — raw field values are never exposed beyond the policy.
+
+| Data Type | Redacted Fields | Obfuscated Fields | Exposed Fields |
+|-----------|----------------|-------------------|---------------|
+| `MailboxNode` | — | `owner_id` | `mailbox_id`, `domain`, `tier`, `created_at`, `quota_bytes` |
+| `FolderNode` | — | — | All fields (structural data only) |
+| `LabelNode` | — | — | All fields (structural data only) |
+| `MailContactNode` | `email_address` | `display_name`, `user_id` | `contact_id`, `is_poly_user`, `trust_score`, `signing_pubkey`, `encryption_pubkey` |
+| `EmailNode` | `content_hash`, `subject_preview` | `sender_id`, `recipient_ids` | `email_id`, `thread_id`, `timestamp`, `attachment_count`, `size_bytes` |
+
+**Redact** = field zeroed in all non-owner contexts (governance, audit, AI feeds see zeros).
+**Obfuscate** = field replaced with a deterministic pseudonym (consistent within a session, unlinkable across sessions).
+**Expose** = field visible to all authorized consumers.
+
+### Cortex Inference Triggers & Feedback
+
+| Trigger | Data Type | When | Action |
+|---------|-----------|------|--------|
+| `infer on_write` | `MailboxNode` | Mailbox created/updated | Anomaly detection on creation patterns (burst creation = abuse signal) |
+| `infer on_write` | `FolderNode` | Folder created | Folder hierarchy depth check |
+| `infer on_read` | `LabelNode` | Label queried | Auto-apply rule evaluation against incoming emails |
+| `infer on_write` | `MailContactNode` | Contact added/updated | Trust score computation, anomaly alert on trust_score drop |
+| `infer on_write` | `EmailNode` | Email received/composed | Full classification pipeline (see below) |
+| `on_classification auto_apply` | `EmailNode` | After `infer on_write` | Spam verdict written to `spam_verdict` overlay; SPAM state transition if verdict is Spam/Phishing/Malware |
+| `on_suggestion store` | `EmailNode` | After classification | Priority suggestions, label suggestions, reply suggestions stored to `cortex/mail/suggestions` |
+| `on_anomaly alert` | `MailboxNode`, `MailContactNode`, `EmailNode` | Anomaly score exceeds threshold | Alert to `mail-team` or `mail-security` via StreamSight |
+
+**Classification pipeline** (on `receive_email`):
+1. `cortex_classify()` runs ESLM spam model → `spam_verdict` overlay
+2. If verdict is Spam/Phishing/Malware → auto-transition to SPAM state
+3. `cortex_score()` runs priority model → `priority_score` overlay
+4. Suggestions (label, reply, priority) written to `cortex/mail/suggestions`
+5. User actions (`mark_not_spam`, `apply_cortex_suggestion`) feed back via `cortex_feedback()` for model improvement
+
+**Feedback loop**: Every user correction (not-spam, accepted/rejected suggestion) calls `cortex_feedback()` or `cortex_feedback_suggestion()`, which updates the local ESLM model weights via federated learning. No raw email content is shared — only verdict labels and confidence scores.
+
+### Quantum State Snapshots (.q)
+
+Both constructs support `.q` quantum state snapshots for mailbox backup, migration, and disaster recovery:
+
+- **`snapshot_mailbox`**: Extracts the full subgraph rooted at a mailbox (3-hop depth: mailbox → folders/labels/contacts → edges), serializes all overlays, Blake3-hashes the state, and appends to `mailbox_series`. The hash is the `.q` state identifier.
+- **`snapshot_thread`**: Extracts the full sub-DAG for a thread, serializes overlays + state machine states for all emails in the thread, Blake3-hashes, and appends to `email_series`.
+- **Migration**: To migrate a mailbox, export all `.q` snapshots for the mailbox + its threads, transfer to the target instance, and replay from the series. Merkle chain verification ensures integrity. Lattice imprint + witness attestation prove provenance.
+- **Backup cadence**: Snapshots are taken on-demand (user-triggered export) and on significant state changes (>100 mutations since last snapshot). Series retention follows tier policy.
 
 ---
 

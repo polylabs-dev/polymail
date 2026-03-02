@@ -1,0 +1,188 @@
+// Poly Mail Metering — Email operation metering
+//
+// Maps each Poly Mail operation to PolyKit metering dimensions:
+//   send    [Bandwidth, Observables, Executions]
+//   receive [Bandwidth, Observables, Storage]
+//   attach  [Bandwidth, Storage]
+//   search  [Executions, Observables]
+//
+// Tier enforcement via polykit_metering check_limits.
+
+import polykit_metering
+
+type MailTier = struct {
+    tier_name: string,
+    max_storage_bytes: u64,
+    max_send_per_day: u64,
+    max_attachment_bytes: u64,
+    custom_domains: u8,
+}
+
+type StorageQuota = struct {
+    used_bytes: u64,
+    limit_bytes: u64,
+    percent_used: f32,
+    over_quota: bool,
+}
+
+type MailUsageSummary = struct {
+    user_id: bytes(16),
+    sends_today: u64,
+    receives_today: u64,
+    storage_used: u64,
+    attachments_stored: u64,
+    searches_today: u64,
+    period_start_ms: u64,
+}
+
+// --- Meter an email send operation ---
+circuit meter_send(user_id: bytes(16), body_size: u64, recipient_count: u8) -> MeteringRecord
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/metering
+    observe metrics: [sends_metered, send_bandwidth_bytes]
+    meters [compute_cycles]
+    wasm_abi [now]
+{
+    let dims = DimensionValues {
+        executions: 1,
+        hashes: 0,
+        bandwidth: body_size * recipient_count,
+        storage: 0,
+        observables: 1 + recipient_count,
+        proofs: 0,
+        circuits: 1,
+        mpc_sessions: 0,
+    }
+    record_usage(user_id, "mail.send", dims)
+}
+
+// --- Meter an email receive operation ---
+circuit meter_receive(user_id: bytes(16), body_size: u64, stored: bool) -> MeteringRecord
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/metering
+    observe metrics: [receives_metered, receive_bandwidth_bytes]
+    meters [compute_cycles]
+{
+    let storage_delta = if stored { body_size } else { 0 }
+    let dims = DimensionValues {
+        executions: 0,
+        hashes: 0,
+        bandwidth: body_size,
+        storage: storage_delta,
+        observables: 1,
+        proofs: 0,
+        circuits: 1,
+        mpc_sessions: 0,
+    }
+    record_usage(user_id, "mail.receive", dims)
+}
+
+// --- Meter an attachment upload/download ---
+circuit meter_attachment(user_id: bytes(16), attachment_size: u64, is_upload: bool) -> MeteringRecord
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/metering
+    observe metrics: [attachments_metered, attachment_bytes_metered]
+    meters [compute_cycles]
+{
+    let storage_delta = if is_upload { attachment_size } else { 0 }
+    let dims = DimensionValues {
+        executions: 0,
+        hashes: 0,
+        bandwidth: attachment_size,
+        storage: storage_delta,
+        observables: 0,
+        proofs: 0,
+        circuits: 0,
+        mpc_sessions: 0,
+    }
+    record_usage(user_id, "mail.attachment", dims)
+}
+
+// --- Check storage quota for a user ---
+circuit check_storage_quota(user_id: bytes(16), tier: MailTier) -> StorageQuota
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/metering
+    observe metrics: [quota_checks, quota_exceeded]
+    monitor "quota_warning" { percent_used < 90.0 }
+    wasm_abi [eslite_query]
+{
+    let usage = get_usage_summary(user_id)
+    let percent = (usage.storage_used * 100) / tier.max_storage_bytes
+    StorageQuota {
+        used_bytes: usage.storage_used,
+        limit_bytes: tier.max_storage_bytes,
+        percent_used: percent,
+        over_quota: usage.storage_used > tier.max_storage_bytes,
+    }
+}
+
+// --- Get full usage summary for a user ---
+circuit get_usage(user_id: bytes(16)) -> MailUsageSummary
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/metering
+    observe metrics: [usage_queries]
+    wasm_abi [eslite_query, now]
+{
+    let summary = get_usage_summary(user_id)
+    let ts = now()
+    let day_start = ts - (ts % 86400000)
+    MailUsageSummary {
+        user_id: user_id,
+        sends_today: summary.dimensions.executions,
+        receives_today: summary.dimensions.bandwidth,
+        storage_used: summary.dimensions.storage,
+        attachments_stored: summary.dimensions.circuits,
+        searches_today: summary.dimensions.observables,
+        period_start_ms: day_start,
+    }
+}
+
+// ── Monitors ─────────────────────────────────────────────────────
+
+monitor "metering_throughput" {
+    assert metric("sends_metered_per_sec") > 200
+    window 60s
+    severity warning
+}
+
+// ── Golden Tests ─────────────────────────────────────────────────
+
+test golden "meter_send_single_recipient" {
+    input {
+        user_id: bytes(16, 0xAA)
+        body_size: 4096
+        recipient_count: 1
+    }
+    assert {
+        let record = meter_send(user_id, body_size, recipient_count)
+        record.dimensions.bandwidth == 4096
+        record.dimensions.executions == 1
+        record.dimensions.observables == 2
+    }
+}
+
+test golden "meter_receive_with_storage" {
+    input {
+        user_id: bytes(16, 0xBB)
+        body_size: 8192
+        stored: true
+    }
+    assert {
+        let record = meter_receive(user_id, body_size, stored)
+        record.dimensions.bandwidth == 8192
+        record.dimensions.storage == 8192
+    }
+}
+
+test golden "meter_attachment_upload" {
+    input {
+        user_id: bytes(16, 0xCC)
+        attachment_size: 1048576
+        is_upload: true
+    }
+    assert {
+        let record = meter_attachment(user_id, attachment_size, is_upload)
+        record.dimensions.bandwidth == 1048576
+        record.dimensions.storage == 1048576
+    }
+}
