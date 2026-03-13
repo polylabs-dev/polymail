@@ -1,4 +1,4 @@
-// Poly Mail RBAC — Role-based access control for mailbox operations (v0.11.0)
+// Poly Mail RBAC — Role-based access control for mailbox operations (v0.12.0)
 //
 // Lex Architecture:
 //   esn/global/org/polylabs/mail/rbac
@@ -44,7 +44,7 @@ data MailUser : mail v1 {
     last_active_at: u64,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/rbac
+    govern lex global/org/polylabs/mail/rbac
     cortex {
         redact [email, pubkey]
         obfuscate [user_id]
@@ -60,7 +60,7 @@ data MailboxInfo : mail v1 {
     created_at: u64,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/rbac
+    govern lex global/org/polylabs/mail/rbac
     cortex {
         infer on_write
         on_anomaly alert "mail-team"
@@ -77,7 +77,7 @@ data MailRoleAssignment : mail v1 {
     expires_at: u64,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/rbac
+    govern lex global/org/polylabs/mail/rbac
     cortex {
         redact [granted_by]
         infer on_write
@@ -95,7 +95,7 @@ data DelegateAccess : mail v1 {
     expires_at: u64,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/rbac
+    govern lex global/org/polylabs/mail/rbac
     cortex {
         obfuscate [delegate_user_id]
         infer on_write
@@ -140,11 +140,11 @@ const READONLY_PERMISSIONS: u64 = 0x01
 
 stream rbac_events: event<MailRoleAssignment>
     retention 7y
-    consumers [governance, audit, streamsight]
+    consumers [governance, audit, observe]
 
 stream delegate_events: event<DelegateAccess>
     retention 7y
-    consumers [governance, audit, streamsight]
+    consumers [governance, audit, observe]
 
 // ── Circuits ────────────────────────────────────────────────────
 
@@ -159,10 +159,10 @@ circuit assign_role(
     expires_at: u64,
 ) -> MailRoleAssignment
     profile poly_framework_sensitive
-    lex esn/global/org/polylabs/mail/rbac
-    precision C
+    lex global/org/polylabs/mail/rbac
+    @precision C
     constant_time true
-    observe metrics: [roles_assigned, role_type, mailbox_assignments]
+    @observe metrics: [roles_assigned, role_type, mailbox_assignments]
     monitor "role_assignment_rate" { roles_assigned < 200 per 3600s }
     invariant "granter_authorized" { has_admin_permission(granter, mailbox_id) }
     invariant "user_exists" { user_id != zero_bytes(32) }
@@ -205,9 +205,9 @@ circuit revoke_role(
     mailbox_id: bytes(32),
 ) -> bool
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/rbac
-    precision C
-    observe metrics: [roles_revoked]
+    lex global/org/polylabs/mail/rbac
+    @precision C
+    @observe metrics: [roles_revoked]
     monitor "role_revocation_rate" { roles_revoked < 100 per 3600s }
     invariant "revoker_authorized" { has_admin_permission(revoker, mailbox_id) }
     invariant "assignment_exists" { eslite_exists("mail_role_assignments", concat(user_id, mailbox_id)) }
@@ -226,9 +226,9 @@ circuit check_permission(
     permission_bit: u64,
 ) -> bool
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/rbac
-    precision C
-    observe metrics: [permission_checks, permission_grants, permission_denials]
+    lex global/org/polylabs/mail/rbac
+    @precision C
+    @observe metrics: [permission_checks, permission_grants, permission_denials]
     monitor "permission_denial_rate" { permission_denials < 200 per 60s }
     invariant "valid_permission_bit" { permission_bit > 0 }
     property safety "expired_assignment_denied" { assignment.expires_at > 0 and assignment.expires_at < now() implies result == false }
@@ -246,9 +246,9 @@ circuit resolve_effective_permissions(
     mailbox_id: bytes(32),
 ) -> u64
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/rbac
-    precision C
-    observe metrics: [permission_resolutions, inheritance_depth]
+    lex global/org/polylabs/mail/rbac
+    @precision C
+    @observe metrics: [permission_resolutions, inheritance_depth]
     monitor "resolution_latency" { resolution_time_ms < 50 }
     invariant "user_nonzero" { user_id != zero_bytes(32) }
     property safety "permissions_monotonic_up_hierarchy" { effective >= direct_permissions }
@@ -285,10 +285,10 @@ circuit grant_delegate_access(
     expires_at: u64,
 ) -> DelegateAccess
     profile poly_framework_sensitive
-    lex esn/global/org/polylabs/mail/rbac
-    precision C
+    lex global/org/polylabs/mail/rbac
+    @precision C
     constant_time true
-    observe metrics: [delegates_granted, send_as_grants, read_grants]
+    @observe metrics: [delegates_granted, send_as_grants, read_grants]
     invariant "granter_is_owner" { has_owner_permission(granter, granter_mailbox_id) }
     invariant "not_self_delegate" { granter != delegate_user_id }
     property safety "delegate_cannot_exceed_owner" { delegate_permissions <= owner_permissions }
@@ -321,9 +321,9 @@ circuit revoke_delegate_access(
     delegate_user_id: bytes(32),
 ) -> bool
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/rbac
-    precision C
-    observe metrics: [delegates_revoked]
+    lex global/org/polylabs/mail/rbac
+    @precision C
+    @observe metrics: [delegates_revoked]
     invariant "revoker_is_owner" { has_owner_permission(revoker, grantor_mailbox_id) }
     meters [compute_cycles]
     wasm_abi [eslite_delete]

@@ -1,6 +1,6 @@
-/// Poly Mail Mailbox Graph — graph mailbox_registry (v0.11.0)
+/// Poly Mail Mailbox Graph — graph mailbox_registry (v0.12.0)
 /// Stratum graph storage + Cortex AI governance
-/// govern lex esn/global/org/polylabs/mail
+/// govern lex global/org/polylabs/mail
 ///
 /// Accounts, folders, labels, and contacts form a typed property graph.
 /// Replaces flat mailbox tables with relational model supporting
@@ -26,7 +26,7 @@ data MailboxNode : mail v1 {
     tier: u8,
 }
     store graph
-    govern lex esn/global/org/polylabs/mail
+    govern lex global/org/polylabs/mail
     cortex {
         obfuscate [owner_id]
         infer on_write
@@ -41,7 +41,7 @@ data FolderNode : mail v1 {
     system_folder: u8,
 }
     store graph
-    govern lex esn/global/org/polylabs/mail
+    govern lex global/org/polylabs/mail
     cortex {
         infer on_write
     }
@@ -53,7 +53,7 @@ data LabelNode : mail v1 {
     auto_apply_rule: bytes(256),
 }
     store graph
-    govern lex esn/global/org/polylabs/mail
+    govern lex global/org/polylabs/mail
     cortex {
         infer on_read
     }
@@ -70,7 +70,7 @@ data MailContactNode : mail v1 {
     trust_score: f32,
 }
     store graph
-    govern lex esn/global/org/polylabs/mail
+    govern lex global/org/polylabs/mail
     cortex {
         redact [email_address]
         obfuscate [display_name, user_id]
@@ -131,7 +131,7 @@ graph mailbox_registry {
     ai_feed mailbox_anomaly
     ai_feed contact_trust_scoring
 
-    observe mailbox_registry: [unread_count, spam_score, thread_count, storage_used] threshold: {
+    @observe mailbox_registry: [unread_count, spam_score, thread_count, storage_used] threshold: {
         anomaly_score 0.85
         baseline_window 120
     }
@@ -151,11 +151,11 @@ circuit create_mailbox(
     domain: bytes(253),
     tier: u8,
 ) -> MailboxNode
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [mailboxes_created, tier]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [mailboxes_created, tier]
     invariant "owner_exists" { owner_id != bytes(16) }
     meters [compute_cycles, storage]
     wasm_abi [random_bytes, eslite_insert, now]
@@ -236,11 +236,11 @@ circuit create_folder(
     name: bytes(128),
     parent_folder_id: bytes(16),
 ) -> FolderNode
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [folders_created]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [folders_created]
     invariant "name_nonempty" { len(name) > 0 }
     meters [compute_cycles, storage]
     wasm_abi [random_bytes, now]
@@ -270,11 +270,11 @@ circuit move_to_folder(
     source_folder_id: bytes(16),
     target_folder_id: bytes(16),
 ) -> bool
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [folder_moves, unread_count_updates]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [folder_moves, unread_count_updates]
     invariant "different_folders" { source_folder_id != target_folder_id }
     meters [compute_cycles]
     wasm_abi [now]
@@ -302,11 +302,11 @@ circuit create_label(
     color: u32,
     auto_apply_rule: bytes(256),
 ) -> LabelNode
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [labels_created, auto_rules_set]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [labels_created, auto_rules_set]
     meters [compute_cycles, storage]
     wasm_abi [random_bytes, now]
 {
@@ -331,11 +331,11 @@ circuit apply_label(
     label_id: bytes(16),
     applied_by: u8,
 ) -> bool
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [labels_applied, auto_applied, user_applied]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [labels_applied, auto_applied, user_applied]
     meters [compute_cycles]
     wasm_abi [now]
 {
@@ -361,11 +361,11 @@ circuit add_contact(
     encryption_pubkey: bytes(1568),
     is_poly_user: bool,
 ) -> MailContactNode
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [contacts_added, poly_contacts, external_contacts]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [contacts_added, poly_contacts, external_contacts]
     meters [compute_cycles, storage]
     wasm_abi [random_bytes, now]
     test golden "add_poly_contact" {
@@ -411,10 +411,10 @@ circuit resolve_contact(
     mailbox_id: bytes(16),
     email_address: bytes(254),
 ) -> MailContactNode
-    lex esn/global/org/polylabs/mail
-    status production
-    precision B
-    observe metrics: [contact_lookups, contact_misses, directory_hits]
+    lex global/org/polylabs/mail
+    @status production
+    @precision B
+    @observe metrics: [contact_lookups, contact_misses, directory_hits]
     wasm_abi [eslite_query]
 {
     let contacts = graph_query(mailbox_registry, mailbox_id, "contacts")
@@ -457,11 +457,11 @@ circuit share_folder(
     target_mailbox_id: bytes(16),
     permission: u8,
 ) -> bool
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [folders_shared, permission_level]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [folders_shared, permission_level]
     invariant "valid_permission" { permission <= 2 }
     meters [compute_cycles]
     wasm_abi [random_bytes, now]
@@ -484,10 +484,10 @@ circuit check_quota(
     mailbox_id: bytes(16),
     incoming_size: u64,
 ) -> bool
-    lex esn/global/org/polylabs/mail
-    status production
-    precision B
-    observe metrics: [quota_checks, quota_exceeded, utilization_pct]
+    lex global/org/polylabs/mail
+    @status production
+    @precision B
+    @observe metrics: [quota_checks, quota_exceeded, utilization_pct]
     meters [compute_cycles]
 {
     let mailbox = graph_lookup(mailbox_registry, mailbox_id)
@@ -506,11 +506,11 @@ circuit snapshot_mailbox(
     graph_id: bytes(32),
     mailbox_id: bytes(16),
 ) -> bytes(32)
-    lex esn/global/org/polylabs/mail
-    status production
-    precision B
-    povc true
-    observe metrics: [snapshots_taken, snapshot_size_bytes]
+    lex global/org/polylabs/mail
+    @status production
+    @precision B
+    @attested true
+    @observe metrics: [snapshots_taken, snapshot_size_bytes]
     meters [compute_cycles, storage]
     wasm_abi [now, blake3_hash]
 {
@@ -527,15 +527,15 @@ circuit snapshot_mailbox(
 
 stream mailbox_mutations: event<MailboxNode>
     retention 365d
-    consumers [governance, audit, streamsight, mail_team]
+    consumers [governance, audit, observe, mail_team]
 
 stream contact_trust_events: event<MailContactNode>
     retention 90d
-    consumers [streamsight, cortex_trust_model]
+    consumers [observe, cortex_trust_model]
 
 stream quota_events: event<MailboxNode>
     retention 30d
-    consumers [metering, billing, streamsight]
+    consumers [metering, billing, observe]
 
 // ── Monitors ─────────────────────────────────────────────────────
 
@@ -553,13 +553,13 @@ monitor "quota_utilization" {
 
 // ── KAT Vectors ──────────────────────────────────────────────────
 
-kat_vector "blake3_empty" {
+golden_test "blake3_empty" {
     function: "blake3"
     input: bytes("")
     expected: hex("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262")
 }
 
-kat_vector "blake3_abc" {
+golden_test "blake3_abc" {
     function: "blake3"
     input: bytes("abc")
     expected: hex("6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85")

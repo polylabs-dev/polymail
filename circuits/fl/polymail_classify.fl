@@ -1,4 +1,4 @@
-// Poly Mail Classify — ESLM spam/phishing classification on-device (v0.11.0)
+// Poly Mail Classify — ESLM spam/phishing classification on-device (v0.12.0)
 //
 // All classification runs client-side in WASM. Email content never
 // leaves the device for spam analysis. The ESLM model is a
@@ -41,7 +41,7 @@ data ClassificationResult : mail v1 {
     inference_time_ms: u32,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/classify
+    govern lex global/org/polylabs/mail/classify
     cortex {
         obfuscate [email_id]
         infer on_write
@@ -55,7 +55,7 @@ data LocalModelWeights : mail v1 {
     last_updated_ms: u64,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/classify
+    govern lex global/org/polylabs/mail/classify
     cortex {
         infer on_write
         on_anomaly alert "mail-team"
@@ -71,9 +71,9 @@ circuit classify_email(
     model: LocalModelWeights,
 ) -> ClassificationResult
     profile poly_framework_sensitive
-    lex esn/global/org/polylabs/mail/classify
-    precision C
-    observe metrics: [classifications, classification_latency_ms, spam_detected, phishing_detected]
+    lex global/org/polylabs/mail/classify
+    @precision C
+    @observe metrics: [classifications, classification_latency_ms, spam_detected, phishing_detected]
     monitor "classification_latency" { classification_latency_ms < 300 }
     invariant "local_only" { model.weights_hash != bytes(32) }
     property safety "no_content_exfiltration" { no_network_io_during(eslm_infer) }
@@ -103,9 +103,9 @@ circuit detect_spam(
     model: LocalModelWeights,
 ) -> SpamScore
     profile poly_framework_sensitive
-    lex esn/global/org/polylabs/mail/classify
-    precision C
-    observe metrics: [spam_scores_computed, spam_positives, spam_negatives]
+    lex global/org/polylabs/mail/classify
+    @precision C
+    @observe metrics: [spam_scores_computed, spam_positives, spam_negatives]
     wasm_abi [eslm_infer]
 {
     let feature_vec = blake3(concat(subject, body))
@@ -135,9 +135,9 @@ circuit detect_phishing(
     headers_hash: bytes(32),
 ) -> [PhishingIndicator]
     profile poly_framework_sensitive
-    lex esn/global/org/polylabs/mail/classify
-    precision C
-    observe metrics: [phishing_scans, phishing_positives, indicator_counts]
+    lex global/org/polylabs/mail/classify
+    @precision C
+    @observe metrics: [phishing_scans, phishing_positives, indicator_counts]
     wasm_abi [eslm_infer, pattern_match]
 {
     let indicators = []
@@ -182,9 +182,9 @@ circuit train_local_model(
     dp_noise_scale: f32,
 ) -> LocalModelWeights
     profile poly_framework_sensitive
-    lex esn/global/org/polylabs/mail/classify
-    precision C
-    observe metrics: [local_training_ops, model_updates, dp_noise_applied]
+    lex global/org/polylabs/mail/classify
+    @precision C
+    @observe metrics: [local_training_ops, model_updates, dp_noise_applied]
     invariant "dp_noise_positive" { dp_noise_scale > 0.0 }
     property safety "dp_noise_always_applied" { dp_noise_scale > 0.0 }
     meters [compute_cycles, memory_bytes]
@@ -211,9 +211,9 @@ circuit report_false_positive(
     model: LocalModelWeights,
 ) -> LocalModelWeights
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/classify
-    precision C
-    observe metrics: [false_positives_reported, model_corrections]
+    lex global/org/polylabs/mail/classify
+    @precision C
+    @observe metrics: [false_positives_reported, model_corrections]
     invariant "different_labels" { original_classification != corrected_classification }
     wasm_abi [eslite_query]
 {
@@ -256,25 +256,25 @@ test golden "classify_spam_email" {
 
 // ── KAT Vectors ──────────────────────────────────────────────────
 
-kat_vector "blake3_empty" {
+golden_test "blake3_empty" {
     function: "blake3"
     input: bytes("")
     expected: hex("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262")
 }
 
-kat_vector "sha3_256_empty" {
+golden_test "sha3_256_empty" {
     function: "sha3_256"
     input: bytes("")
     expected: hex("a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a")
 }
 
-kat_vector "blake3_abc" {
+golden_test "blake3_abc" {
     function: "blake3"
     input: bytes("abc")
     expected: hex("6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85")
 }
 
-kat_vector "sha3_256_abc" {
+golden_test "sha3_256_abc" {
     function: "sha3_256"
     input: bytes("abc")
     expected: hex("3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532")

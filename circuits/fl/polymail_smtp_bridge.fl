@@ -1,4 +1,4 @@
-// Poly Mail SMTP Bridge — SMTP/IMAP interop for classical email clients (v0.11.0)
+// Poly Mail SMTP Bridge — SMTP/IMAP interop for classical email clients (v0.12.0)
 //
 // Local bridge: localhost IMAP (1143) / SMTP (1025) for Thunderbird, Outlook, etc.
 // Server-side gateway: MX records → Poly Mail ingest with PQ re-encryption.
@@ -20,7 +20,7 @@ data SmtpSession : mail v1 {
     state: SmtpState,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/bridge
+    govern lex global/org/polylabs/mail/bridge
     cortex {
         obfuscate [client_addr]
         infer on_write
@@ -46,7 +46,7 @@ data ImapFolder : mail v1 {
     unseen_count: u32,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/bridge
+    govern lex global/org/polylabs/mail/bridge
     cortex {
         infer on_write
         on_anomaly alert "mail-team"
@@ -62,7 +62,7 @@ data DkimSignature : mail v1 {
     timestamp: u64,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/bridge
+    govern lex global/org/polylabs/mail/bridge
     cortex {
         infer on_write
         on_anomaly alert "mail-security"
@@ -102,9 +102,9 @@ circuit smtp_receive(
     recipient_encryption_pk: bytes(1568),
 ) -> PolymailMessage
     profile poly_framework_sensitive
-    lex esn/global/org/polylabs/mail/bridge
-    precision C
-    observe metrics: [smtp_inbound, mime_conversions, dkim_verifications, spf_checks]
+    lex global/org/polylabs/mail/bridge
+    @precision C
+    @observe metrics: [smtp_inbound, mime_conversions, dkim_verifications, spf_checks]
     monitor "smtp_receive_latency" { receive_latency_ms < 1000 }
     invariant "session_authenticated" { session.authenticated == true }
     property safety "dkim_must_pass" { dkim_valid == true }
@@ -128,9 +128,9 @@ circuit smtp_send(
     recipient_addresses: [bytes(254)],
 ) -> SmtpSession
     profile poly_framework_sensitive
-    lex esn/global/org/polylabs/mail/bridge
-    precision C
-    observe metrics: [smtp_outbound, dkim_signatures_created, delivery_attempts]
+    lex global/org/polylabs/mail/bridge
+    @precision C
+    @observe metrics: [smtp_outbound, dkim_signatures_created, delivery_attempts]
     monitor "smtp_send_latency" { send_latency_ms < 5000 }
     meters [compute_cycles, bandwidth]
     wasm_abi [smtp_relay, random_bytes, now]
@@ -159,9 +159,9 @@ circuit imap_sync(
     last_uid: u32,
 ) -> ImapFolder
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/bridge
-    precision C
-    observe metrics: [imap_syncs, messages_synced, folder_updates]
+    lex global/org/polylabs/mail/bridge
+    @precision C
+    @observe metrics: [imap_syncs, messages_synced, folder_updates]
     wasm_abi [eslite_query]
 {
     let folder_data = eslite_query(mailbox_id, folder_name)
@@ -184,10 +184,10 @@ circuit dkim_sign(
     mime: MimeMessage,
 ) -> DkimSignature
     profile poly_framework_sensitive
-    lex esn/global/org/polylabs/mail/bridge
-    precision C
+    lex global/org/polylabs/mail/bridge
+    @precision C
     constant_time true
-    observe metrics: [dkim_sign_ops, pq_dkim_signatures]
+    @observe metrics: [dkim_sign_ops, pq_dkim_signatures]
 {
     let headers_to_sign = ["from", "to", "subject", "date", "message-id"]
     let canonicalized = dkim_canonicalize(mime.raw_headers, headers_to_sign)
@@ -209,9 +209,9 @@ circuit dkim_sign(
 // --- DKIM verify (supports both ML-DSA-87 and classical) ---
 circuit dkim_verify(raw_email: bytes) -> bool
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/bridge
-    precision C
-    observe metrics: [dkim_verify_ops, dkim_pass, dkim_fail]
+    lex global/org/polylabs/mail/bridge
+    @precision C
+    @observe metrics: [dkim_verify_ops, dkim_pass, dkim_fail]
 {
     let dkim_header = extract_dkim_header(raw_email)
     let pubkey = dns_dkim_lookup(dkim_header.domain, dkim_header.selector)
@@ -228,9 +228,9 @@ circuit dkim_verify(raw_email: bytes) -> bool
 // --- Convert MIME message to Poly Mail internal format ---
 circuit mime_to_polymail(mime: MimeMessage) -> PolymailMessage
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/bridge
-    precision C
-    observe metrics: [mime_to_poly_conversions]
+    lex global/org/polylabs/mail/bridge
+    @precision C
+    @observe metrics: [mime_to_poly_conversions]
 {
     let email_id = blake3(concat(mime.message_id, mime.date))
     let sender_id = blake3(mime.from_header)
@@ -251,9 +251,9 @@ circuit mime_to_polymail(mime: MimeMessage) -> PolymailMessage
 // --- Convert Poly Mail message to MIME for SMTP delivery ---
 circuit polymail_to_mime(msg: PolymailMessage) -> MimeMessage
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/bridge
-    precision C
-    observe metrics: [poly_to_mime_conversions]
+    lex global/org/polylabs/mail/bridge
+    @precision C
+    @observe metrics: [poly_to_mime_conversions]
 {
     let message_id = blake3(concat(msg.email_id, msg.timestamp))
     let body_part = MimeBodyPart {
@@ -344,25 +344,25 @@ test golden "dkim_sign_verify_roundtrip" {
 
 // ── KAT Vectors ──────────────────────────────────────────────────
 
-kat_vector "sha3_256_empty" {
+golden_test "sha3_256_empty" {
     function: "sha3_256"
     input: bytes("")
     expected: hex("a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a")
 }
 
-kat_vector "sha3_256_abc" {
+golden_test "sha3_256_abc" {
     function: "sha3_256"
     input: bytes("abc")
     expected: hex("3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532")
 }
 
-kat_vector "blake3_empty" {
+golden_test "blake3_empty" {
     function: "blake3"
     input: bytes("")
     expected: hex("af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262")
 }
 
-kat_vector "mldsa_87_sign_verify" {
+golden_test "mldsa_87_sign_verify" {
     function: "mldsa_sign"
     signing_key: test_key("mldsa87_kat_sk")
     message: hex("54657374")

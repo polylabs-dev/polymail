@@ -1,4 +1,4 @@
-// Poly Mail Filter — Server-side filter rules on metadata only (v0.11.0)
+// Poly Mail Filter — Server-side filter rules on metadata only (v0.12.0)
 //
 // Filters execute server-side but ONLY against email metadata (sender domain,
 // recipient list, headers hash, size, attachment count). The server never sees
@@ -52,7 +52,7 @@ data FilterRule : mail v1 {
     org_policy: bool,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/filter
+    govern lex global/org/polylabs/mail/filter
     cortex {
         obfuscate [mailbox_id]
         infer on_write
@@ -68,7 +68,7 @@ data FilterExecution : mail v1 {
     executed_at: u64,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/filter
+    govern lex global/org/polylabs/mail/filter
     cortex {
         obfuscate [email_id]
         infer on_write
@@ -96,7 +96,7 @@ type FilterMatchResult = struct {
 
 stream filter_events: event<FilterExecution>
     retention 90d
-    consumers [governance, audit, streamsight]
+    consumers [governance, audit, observe]
 
 // --- Create a new filter rule ---
 circuit create_filter(
@@ -109,9 +109,9 @@ circuit create_filter(
     action_target: bytes(32),
 ) -> FilterRule
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/filter
-    precision C
-    observe metrics: [filters_created, filter_types]
+    lex global/org/polylabs/mail/filter
+    @precision C
+    @observe metrics: [filters_created, filter_types]
     invariant "name_nonempty" { len(name) > 0 }
     meters [compute_cycles, storage]
     wasm_abi [random_bytes, eslite_insert, now]
@@ -150,9 +150,9 @@ circuit update_filter(
     action_target: bytes(32),
 ) -> FilterRule
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/filter
-    precision C
-    observe metrics: [filters_updated]
+    lex global/org/polylabs/mail/filter
+    @precision C
+    @observe metrics: [filters_updated]
     invariant "rule_exists" { eslite_exists("filter_rules", concat(mailbox_id, rule_id)) }
     invariant "not_org_policy" { not eslite_query("filter_rules", concat(mailbox_id, rule_id)).org_policy }
     meters [compute_cycles]
@@ -185,9 +185,9 @@ circuit delete_filter(
     rule_id: bytes(16),
 ) -> bool
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/filter
-    precision C
-    observe metrics: [filters_deleted]
+    lex global/org/polylabs/mail/filter
+    @precision C
+    @observe metrics: [filters_deleted]
     invariant "rule_exists" { eslite_exists("filter_rules", concat(mailbox_id, rule_id)) }
     invariant "not_org_policy" { not eslite_query("filter_rules", concat(mailbox_id, rule_id)).org_policy }
     meters [compute_cycles]
@@ -203,9 +203,9 @@ circuit evaluate_filters(
     metadata: EmailMetadata,
 ) -> [FilterMatchResult]
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/filter
-    precision C
-    observe metrics: [filter_evaluations, filter_matches, filter_misses, evaluation_latency_ms]
+    lex global/org/polylabs/mail/filter
+    @precision C
+    @observe metrics: [filter_evaluations, filter_matches, filter_misses, evaluation_latency_ms]
     monitor "filter_evaluation_latency" { evaluation_latency_ms < 50 }
     invariant "metadata_only" { metadata.email_id != zero_bytes(16) }
     property safety "no_plaintext_access" { no_body_access_during(evaluate) }
@@ -273,9 +273,9 @@ circuit evaluate_filters(
 // --- List all filter rules for a mailbox ---
 circuit list_filters(mailbox_id: bytes(16)) -> [FilterRule]
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/filter
-    precision B
-    observe metrics: [filter_list_queries]
+    lex global/org/polylabs/mail/filter
+    @precision B
+    @observe metrics: [filter_list_queries]
     meters [compute_cycles]
     wasm_abi [eslite_scan]
 {
@@ -295,9 +295,9 @@ circuit push_org_filter(
     action_target: bytes(32),
 ) -> u32
     profile poly_framework_sensitive
-    lex esn/global/org/polylabs/mail/filter
-    precision C
-    observe metrics: [org_filters_pushed, mailboxes_affected]
+    lex global/org/polylabs/mail/filter
+    @precision C
+    @observe metrics: [org_filters_pushed, mailboxes_affected]
     invariant "has_admin_role" { check_org_admin(org_id) }
     meters [compute_cycles, storage]
     wasm_abi [random_bytes, eslite_insert, now]

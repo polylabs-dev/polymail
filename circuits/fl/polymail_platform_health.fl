@@ -1,4 +1,4 @@
-/// Poly Mail Platform Health — Blind relay pattern health monitoring (v0.11.0)
+/// Poly Mail Platform Health — Blind relay pattern health monitoring (v0.12.0)
 ///
 /// Aggregates mailbox-operation metrics through blinded, cohort-enforced telemetry.
 /// Stratum: kv store + lex governance under esn/global/org/polylabs/mail.
@@ -7,7 +7,7 @@
 /// Zero-linkage: HKDF("poly-mail-telemetry-v1") isolates all identity.
 /// No email content, addresses, subjects, or mailbox structure ever reach StreamSight.
 ///
-/// govern lex esn/global/org/polylabs/mail
+/// govern lex global/org/polylabs/mail
 
 import polykit_blind_telemetry from "../../polykit/circuits/fl/polykit_blind_telemetry.fl"
 import polykit_metering from "../../polykit/circuits/fl/polykit_metering.fl"
@@ -32,7 +32,7 @@ data PlatformMetrics : mail v1 {
     collected_at: u64,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail
+    govern lex global/org/polylabs/mail
     cortex {
         obfuscate [blinded_user_id, anomaly_score, spam_rate_per_hr]
         infer on_write
@@ -49,12 +49,12 @@ type HealthStatus = enum {
 
 stream mail_health_events: event<PlatformMetrics>
     retention 365d
-    consumers [streamsight, audit_trail]
+    consumers [observe, audit_trail]
     classify blinded_user_id: METADATA, cohort_size: METADATA
 
 stream mail_anomaly_events: event<PlatformMetrics>
     retention forever
-    consumers [streamsight, governance, alerting]
+    consumers [observe, governance, alerting]
 
 // ── Series ──────────────────────────────────────────────────────────
 
@@ -77,20 +77,20 @@ circuit mail_platform_health(
     window_hours: f64,
 ) -> PlatformMetrics
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail {
+    lex global/org/polylabs/mail {
         governance hierarchical
         audit_trail true
         sub_lex mailbox fan_in
     }
-    precision C
-    streamsight true
-    povc true
-    observe metrics: [platform_queries, active_mailboxes, messages_processed, spam_detections, encryption_ops, storage_bytes]
+    @precision C
+    @observe true
+    @attested true
+    @observe metrics: [platform_queries, active_mailboxes, messages_processed, spam_detections, encryption_ops, storage_bytes]
     invariant "no_content_at_platform" { content_visible == false }
     property safety "session_isolation" { no_cross_session_data }
     property liveness "eventually_healthy" { eventually(all_healthy == true) }
     monitor "spam_detection_rate" { spam_detections < 10000/hr }
-    esz_emit "verify/mail_health.esz"
+    @serialize "verify/mail_health.esz"
     li_feed full_escir true, optimized_ir true, optimization_metadata true
     fuzz_target
     test golden "healthy_platform" {
@@ -200,13 +200,13 @@ circuit mail_anomaly_check(
     window_ms: u64,
 ) -> (HealthStatus, f64, string)
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail {
+    lex global/org/polylabs/mail {
         governance hierarchical
         audit_trail true
     }
-    precision C
-    streamsight true
-    observe metrics: [anomaly_checks, anomaly_detections]
+    @precision C
+    @observe true
+    @observe metrics: [anomaly_checks, anomaly_detections]
     monitor "anomaly_rate" { anomaly_detections < 50/hr }
     cortex {
         ai_feed {

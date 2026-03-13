@@ -1,4 +1,4 @@
-// Poly Mail Calendar — iCalendar invite handling (v0.11.0)
+// Poly Mail Calendar — iCalendar invite handling (v0.12.0)
 //
 // Parses and processes iCalendar (RFC 5545) invitations embedded in emails.
 // Supports VEVENT, VTODO, and VFREEBUSY components. RSVP responses are
@@ -53,7 +53,7 @@ data CalendarEvent : mail v1 {
     updated_at: u64,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/calendar
+    govern lex global/org/polylabs/mail/calendar
     cortex {
         obfuscate [organizer_id, mailbox_id]
         infer on_write
@@ -69,7 +69,7 @@ data CalendarAttendee : mail v1 {
     responded_at: u64,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/calendar
+    govern lex global/org/polylabs/mail/calendar
     cortex {
         obfuscate [user_id]
         infer on_write
@@ -84,7 +84,7 @@ data FreeBusySlot : mail v1 {
     blinded_proof: bytes(32),
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/calendar
+    govern lex global/org/polylabs/mail/calendar
     cortex {
         obfuscate [mailbox_id, blinded_proof]
         infer on_write
@@ -110,11 +110,11 @@ type RsvpResponse = struct {
 
 stream calendar_events: event<CalendarEvent>
     retention 365d
-    consumers [governance, audit, streamsight]
+    consumers [governance, audit, observe]
 
 stream rsvp_events: event<CalendarAttendee>
     retention 90d
-    consumers [streamsight, mail_team]
+    consumers [observe, mail_team]
 
 // --- Parse iCalendar payload from email and create event ---
 circuit process_invite(
@@ -125,9 +125,9 @@ circuit process_invite(
     attendee_ids: [bytes(16)],
 ) -> CalendarEvent
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/calendar
-    precision C
-    observe metrics: [invites_processed, events_created, recurring_events]
+    lex global/org/polylabs/mail/calendar
+    @precision C
+    @observe metrics: [invites_processed, events_created, recurring_events]
     monitor "invite_processing_latency" { processing_latency_ms < 500 }
     invariant "valid_ical" { len(ical_payload.raw_ical) > 0 }
     invariant "valid_method" { ical_payload.method == bytes("REQUEST") or ical_payload.method == bytes("CANCEL") }
@@ -195,10 +195,10 @@ circuit rsvp_respond(
     signing_sk: bytes(4896),
 ) -> RsvpResponse
     profile poly_framework_sensitive
-    lex esn/global/org/polylabs/mail/calendar
-    precision C
+    lex global/org/polylabs/mail/calendar
+    @precision C
     constant_time true
-    observe metrics: [rsvp_responses, rsvp_accepted, rsvp_declined, rsvp_tentative]
+    @observe metrics: [rsvp_responses, rsvp_accepted, rsvp_declined, rsvp_tentative]
     invariant "event_exists" { eslite_exists("calendar_events", event_id) }
     invariant "attendee_exists" { eslite_exists("calendar_attendees", concat(event_id, user_id)) }
     property safety "rsvp_is_signed" { len(signature) == 4627 }
@@ -236,9 +236,9 @@ circuit query_free_busy(
     user_search_key: bytes(32),
 ) -> [FreeBusySlot]
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/calendar
-    precision C
-    observe metrics: [freebusy_queries, slots_returned]
+    lex global/org/polylabs/mail/calendar
+    @precision C
+    @observe metrics: [freebusy_queries, slots_returned]
     invariant "valid_range" { start_time < end_time }
     property safety "no_event_details_leaked" { all_slots_blinded(result) }
     meters [compute_cycles, memory_bytes]
@@ -277,9 +277,9 @@ circuit list_events(
     end_time: u64,
 ) -> [CalendarEvent]
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/calendar
-    precision B
-    observe metrics: [event_list_queries, events_returned]
+    lex global/org/polylabs/mail/calendar
+    @precision B
+    @observe metrics: [event_list_queries, events_returned]
     invariant "valid_range" { start_time < end_time }
     meters [compute_cycles]
     wasm_abi [eslite_scan]
@@ -295,9 +295,9 @@ circuit list_events(
 // --- Get attendees and their RSVP status for an event ---
 circuit get_attendees(event_id: bytes(16)) -> [CalendarAttendee]
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/calendar
-    precision B
-    observe metrics: [attendee_queries, attendee_count]
+    lex global/org/polylabs/mail/calendar
+    @precision B
+    @observe metrics: [attendee_queries, attendee_count]
     meters [compute_cycles]
     wasm_abi [eslite_scan]
 {
@@ -311,10 +311,10 @@ circuit cancel_event(
     signing_sk: bytes(4896),
 ) -> CalendarEvent
     profile poly_framework_sensitive
-    lex esn/global/org/polylabs/mail/calendar
-    precision C
+    lex global/org/polylabs/mail/calendar
+    @precision C
     constant_time true
-    observe metrics: [events_cancelled]
+    @observe metrics: [events_cancelled]
     invariant "event_exists" { eslite_exists("calendar_events", event_id) }
     invariant "is_organizer" { eslite_query("calendar_events", event_id).organizer_id == organizer_id }
     meters [compute_cycles]

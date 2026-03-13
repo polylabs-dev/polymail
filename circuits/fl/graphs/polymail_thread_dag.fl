@@ -1,6 +1,6 @@
-/// Poly Mail Thread DAG — dag email_thread (v0.11.0)
+/// Poly Mail Thread DAG — dag email_thread (v0.12.0)
 /// Stratum DAG storage + Cortex AI governance
-/// govern lex esn/global/org/polylabs/mail
+/// govern lex global/org/polylabs/mail
 ///
 /// Emails form a DAG within each conversation thread. Replies create
 /// parent edges, forwards branch. Enables threading, ordering, and
@@ -48,7 +48,7 @@ data EmailNode : mail v1 {
     pq_signature: bytes(4627),
 }
     store dag
-    govern lex esn/global/org/polylabs/mail
+    govern lex global/org/polylabs/mail
     cortex {
         redact [content_hash, subject_preview]
         obfuscate [sender_id, recipient_ids]
@@ -138,7 +138,7 @@ dag email_thread {
         cold @nvme,
     }
 
-    attest povc {
+    attest attested {
         witness threshold(2, 3)
     }
 
@@ -146,7 +146,7 @@ dag email_thread {
     ai_feed thread_priority_scoring
     ai_feed phishing_detection
 
-    observe email_thread: [read_status, label_mask, spam_verdict, priority_score] threshold: {
+    @observe email_thread: [read_status, label_mask, spam_verdict, priority_score] threshold: {
         anomaly_score 0.8
         baseline_window 60
     }
@@ -168,11 +168,11 @@ circuit compose_draft(
     thread_id: bytes(16),
     in_reply_to: bytes(16),
 ) -> EmailNode
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [drafts_created, draft_replies, draft_new_threads]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [drafts_created, draft_replies, draft_new_threads]
     meters [compute_cycles, storage]
     wasm_abi [random_bytes, now]
     test golden "compose_new_thread" {
@@ -231,12 +231,12 @@ circuit send_email(
     body: bytes,
     recipient_bundles: list<RecipientKeyBundle>,
 ) -> EncryptedEmail
-    lex esn/global/org/polylabs/mail
-    status production
-    precision A
-    povc true
+    lex global/org/polylabs/mail
+    @status production
+    @precision A
+    @attested true
     constant_time true
-    observe metrics: [emails_sent, send_latency_ms, multi_recipient_sends, encrypted_size_bytes]
+    @observe metrics: [emails_sent, send_latency_ms, multi_recipient_sends, encrypted_size_bytes]
     monitor "send_latency" { send_latency_ms < 500 }
     invariant "draft_exists" { dag_lookup(email_thread, email_id) != null }
     property safety "email_always_encrypted" { encrypted.content_hash != zero_bytes(32) }
@@ -283,12 +283,12 @@ circuit receive_email(
     recipient_id: bytes(16),
     thread_id: bytes(16),
 ) -> EmailNode
-    lex esn/global/org/polylabs/mail
-    status production
-    precision A
-    povc true
+    lex global/org/polylabs/mail
+    @status production
+    @precision A
+    @attested true
     constant_time true
-    observe metrics: [emails_received, receive_latency_ms, thread_extensions, spam_auto_classified]
+    @observe metrics: [emails_received, receive_latency_ms, thread_extensions, spam_auto_classified]
     monitor "receive_latency" { receive_latency_ms < 300 }
     property safety "signature_verified" { sig_valid == true }
     meters [compute_cycles, storage, bandwidth]
@@ -351,11 +351,11 @@ circuit mark_read(
     email_id: bytes(16),
     mailbox_id: bytes(16),
 ) -> bool
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [emails_read, unread_decrements]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [emails_read, unread_decrements]
     meters [compute_cycles]
 {
     let current_state = sm_state(email_lifecycle, email_id)
@@ -372,11 +372,11 @@ circuit star_email(
     email_id: bytes(16),
     starred: bool,
 ) -> bool
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [stars_toggled]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [stars_toggled]
     meters [compute_cycles]
 {
     overlay_set(email_thread, email_id, "star", starred)
@@ -388,11 +388,11 @@ circuit set_label_mask(
     email_id: bytes(16),
     mask: u64,
 ) -> bool
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [label_mask_updates]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [label_mask_updates]
     meters [compute_cycles]
 {
     overlay_set(email_thread, email_id, "label_mask", mask)
@@ -406,11 +406,11 @@ circuit archive_email(
     email_id: bytes(16),
     mailbox_id: bytes(16),
 ) -> bool
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [emails_archived]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [emails_archived]
     meters [compute_cycles]
 {
     sm_transition(email_lifecycle, email_id, "ARCHIVED")
@@ -424,11 +424,11 @@ circuit delete_email(
     mailbox_id: bytes(16),
     permanent: bool,
 ) -> bool
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [emails_deleted, permanent_deletes, soft_deletes]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [emails_deleted, permanent_deletes, soft_deletes]
     meters [compute_cycles, storage]
 {
     sm_transition(email_lifecycle, email_id, "DELETED")
@@ -449,11 +449,11 @@ circuit move_to_spam(
     verdict: u8,
     confidence: f32,
 ) -> bool
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [spam_moves, user_spam_reports, auto_spam_detections, verdict_distribution]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [spam_moves, user_spam_reports, auto_spam_detections, verdict_distribution]
     meters [compute_cycles]
 {
     sm_transition(email_lifecycle, email_id, "SPAM")
@@ -469,11 +469,11 @@ circuit mark_not_spam(
     email_id: bytes(16),
     mailbox_id: bytes(16),
 ) -> bool
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [not_spam_corrections, false_positive_rate]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [not_spam_corrections, false_positive_rate]
     meters [compute_cycles]
 {
     sm_transition(email_lifecycle, email_id, "DELIVERED")
@@ -493,11 +493,11 @@ circuit forward_email(
     recipients: list<bytes(16)>,
     note_hash: bytes(32),
 ) -> EmailNode
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [emails_forwarded, forward_recipients]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [emails_forwarded, forward_recipients]
     meters [compute_cycles, storage]
     wasm_abi [random_bytes, now]
 {
@@ -535,10 +535,10 @@ circuit get_thread(
     graph_id: bytes(32),
     thread_id: bytes(16),
 ) -> list<EmailNode>
-    lex esn/global/org/polylabs/mail
-    status production
-    precision B
-    observe metrics: [thread_lookups, thread_depth, thread_node_count]
+    lex global/org/polylabs/mail
+    @status production
+    @precision B
+    @observe metrics: [thread_lookups, thread_depth, thread_node_count]
 {
     let nodes = dag_query(email_thread, thread_id, "by_thread")
     dag_topo_sort(nodes)
@@ -548,10 +548,10 @@ circuit get_thread_participants(
     graph_id: bytes(32),
     thread_id: bytes(16),
 ) -> list<bytes(16)>
-    lex esn/global/org/polylabs/mail
-    status production
-    precision B
-    observe metrics: [participant_lookups, participant_count]
+    lex global/org/polylabs/mail
+    @status production
+    @precision B
+    @observe metrics: [participant_lookups, participant_count]
 {
     let nodes = dag_query(email_thread, thread_id, "by_thread")
     let participants = set<bytes(16)>()
@@ -571,10 +571,10 @@ circuit get_cortex_suggestions(
     mailbox_id: bytes(16),
     limit: u32,
 ) -> list<CortexSuggestion>
-    lex esn/global/org/polylabs/mail
-    status production
-    precision B
-    observe metrics: [suggestion_reads, suggestion_types]
+    lex global/org/polylabs/mail
+    @status production
+    @precision B
+    @observe metrics: [suggestion_reads, suggestion_types]
 {
     cortex_read_suggestions("cortex/mail/suggestions", mailbox_id, limit)
 }
@@ -584,11 +584,11 @@ circuit apply_cortex_suggestion(
     suggestion_id: bytes(16),
     accepted: bool,
 ) -> bool
-    lex esn/global/org/polylabs/mail
-    status production
-    precision C
-    povc true
-    observe metrics: [suggestions_accepted, suggestions_rejected, suggestion_feedback]
+    lex global/org/polylabs/mail
+    @status production
+    @precision C
+    @attested true
+    @observe metrics: [suggestions_accepted, suggestions_rejected, suggestion_feedback]
     meters [compute_cycles]
 {
     if accepted {
@@ -604,11 +604,11 @@ circuit snapshot_thread(
     graph_id: bytes(32),
     thread_id: bytes(16),
 ) -> bytes(32)
-    lex esn/global/org/polylabs/mail
-    status production
-    precision B
-    povc true
-    observe metrics: [thread_snapshots, snapshot_node_count]
+    lex global/org/polylabs/mail
+    @status production
+    @precision B
+    @attested true
+    @observe metrics: [thread_snapshots, snapshot_node_count]
     meters [compute_cycles, storage]
     wasm_abi [now, blake3_hash]
 {
@@ -626,19 +626,19 @@ circuit snapshot_thread(
 
 stream email_mutations: event<EmailNode>
     retention 365d
-    consumers [governance, audit, streamsight, mail_team]
+    consumers [governance, audit, observe, mail_team]
 
 stream email_classification_events: event<EmailNode>
     retention 90d
-    consumers [streamsight, cortex_spam_model, mail_security]
+    consumers [observe, cortex_spam_model, mail_security]
 
 stream email_lifecycle_transitions: event<EmailNode>
     retention 365d
-    consumers [governance, audit, compliance, streamsight]
+    consumers [governance, audit, compliance, observe]
 
 stream cortex_suggestion_events: event<CortexSuggestion>
     retention 30d
-    consumers [cortex_feedback_loop, streamsight]
+    consumers [cortex_feedback_loop, observe]
 
 // ── Monitors ─────────────────────────────────────────────────────
 
@@ -650,7 +650,7 @@ monitor "thread_operations_rate" {
 
 // ── KAT Vectors ──────────────────────────────────────────────────
 
-kat_vector "mldsa_87_sign_verify" {
+golden_test "mldsa_87_sign_verify" {
     function: "mldsa_sign"
     signing_key: test_key("mldsa87_kat_sk")
     message: hex("54657374")
