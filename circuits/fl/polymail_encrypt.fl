@@ -1,4 +1,4 @@
-// Poly Mail Encrypt — E2E email encryption with ML-KEM-1024
+// Poly Mail Encrypt — E2E email encryption with ML-KEM-1024 (v0.11.0)
 //
 // Multi-recipient envelope encryption: each email is encrypted with a
 // random AES-256-GCM content key, then that key is wrapped per-recipient
@@ -25,7 +25,7 @@ type RecipientKeyBundle = struct {
     wrapped_key_ciphertext: bytes(1568),
 }
 
-type EncryptedEmail = struct {
+data EncryptedEmail : mail v1 {
     email_id: bytes(16),
     sender_id: bytes(16),
     nonce: Nonce,
@@ -36,6 +36,13 @@ type EncryptedEmail = struct {
     content_hash: bytes(32),
     sender_signature: bytes(4627),
 }
+    store kv
+    govern lex esn/global/org/polylabs/mail/encrypt
+    cortex {
+        obfuscate [sender_id]
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
 
 type DecryptedEmail = struct {
     email_id: bytes(16),
@@ -44,13 +51,19 @@ type DecryptedEmail = struct {
     verified: bool,
 }
 
-type EncryptedAttachment = struct {
+data EncryptedAttachment : mail v1 {
     attachment_id: bytes(16),
     nonce: Nonce,
     encrypted_data: bytes,
     tag: bytes(16),
     content_hash: bytes(32),
 }
+    store kv
+    govern lex esn/global/org/polylabs/mail/encrypt
+    cortex {
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
 
 // --- Encrypt email body for multiple recipients ---
 circuit encrypt_email(
@@ -61,11 +74,14 @@ circuit encrypt_email(
 ) -> EncryptedEmail
     profile poly_framework_sensitive
     lex esn/global/org/polylabs/mail/encrypt
+    precision C
     constant_time true
     observe metrics: [emails_encrypted, encrypt_latency_ms, recipient_key_wraps]
     monitor "encrypt_latency" { encrypt_latency_ms < 200 }
     invariant "body_nonempty" { len(body) > 0 }
     invariant "at_least_one_recipient" { len(recipient_pubkeys) >= 1 }
+    property safety "ciphertext_not_plaintext" { encrypted_body != body }
+    property liveness "encryption_completes" { eventually(email_id != zero_bytes(16)) }
     meters [compute_cycles, memory_bytes]
     wasm_abi [random_bytes, now]
 {
@@ -101,10 +117,12 @@ circuit decrypt_email(
 ) -> DecryptedEmail
     profile poly_framework_sensitive
     lex esn/global/org/polylabs/mail/encrypt
+    precision C
     constant_time true
     observe metrics: [emails_decrypted, decrypt_failures, signature_verifications]
     monitor "decrypt_latency" { decrypt_latency_ms < 150 }
     invariant "recipient_present" { find_bundle(email.recipient_bundles, recipient_id) != null }
+    property safety "verified_or_rejected" { decrypted.verified == true or error("invalid_signature") }
     meters [compute_cycles, memory_bytes]
 {
     let bundle = find_bundle(email.recipient_bundles, recipient_id)
@@ -126,9 +144,11 @@ circuit decrypt_email(
 circuit encrypt_attachment(attachment_data: bytes) -> (EncryptedAttachment, AttachmentKey)
     profile poly_framework_sensitive
     lex esn/global/org/polylabs/mail/encrypt
+    precision C
     constant_time true
     observe metrics: [attachments_encrypted, attachment_bytes_encrypted]
     invariant "data_nonempty" { len(attachment_data) > 0 }
+    meters [compute_cycles, memory_bytes]
     wasm_abi [random_bytes]
 {
     let att_key = random_bytes(32)
@@ -149,6 +169,7 @@ circuit encrypt_attachment(attachment_data: bytes) -> (EncryptedAttachment, Atta
 circuit decrypt_attachment(att_key: AttachmentKey, attachment: EncryptedAttachment) -> bytes
     profile poly_framework_sensitive
     lex esn/global/org/polylabs/mail/encrypt
+    precision C
     constant_time true
     observe metrics: [attachments_decrypted, attachment_bytes_decrypted]
 {
@@ -162,6 +183,7 @@ circuit decrypt_attachment(att_key: AttachmentKey, attachment: EncryptedAttachme
 circuit wrap_recipient_key(email_key: EmailKey, recipient_pk: bytes(1568), recipient_id: bytes(16)) -> RecipientKeyBundle
     profile poly_framework_sensitive
     lex esn/global/org/polylabs/mail/encrypt
+    precision C
     constant_time true
     observe metrics: [key_wraps]
 {
@@ -180,6 +202,7 @@ circuit wrap_recipient_key(email_key: EmailKey, recipient_pk: bytes(1568), recip
 circuit unwrap_recipient_key(recipient_sk: bytes(3168), wrapped_ciphertext: bytes(1568)) -> EmailKey
     profile poly_framework_sensitive
     lex esn/global/org/polylabs/mail/encrypt
+    precision C
     constant_time true
     observe metrics: [key_unwraps, unwrap_failures]
 {

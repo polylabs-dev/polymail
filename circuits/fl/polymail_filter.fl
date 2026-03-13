@@ -1,0 +1,400 @@
+// Poly Mail Filter — Server-side filter rules on metadata only (v0.11.0)
+//
+// Filters execute server-side but ONLY against email metadata (sender domain,
+// recipient list, headers hash, size, attachment count). The server never sees
+// plaintext email content — all body/subject data stays encrypted.
+//
+// Filter actions: move to folder, apply label, mark spam, forward, delete.
+// Rules are user-defined and stored encrypted in ESLite; the server evaluates
+// rules against metadata envelope fields only.
+//
+// Enterprise: admins can push org-wide filter policies via lex governance.
+
+import polykit_identity
+import polykit_metering
+
+type FilterAction = enum {
+    MoveToFolder,
+    ApplyLabel,
+    MarkSpam,
+    Forward,
+    Delete,
+    MarkRead,
+    Star,
+}
+
+type FilterCondition = enum {
+    SenderDomainEquals,
+    SenderDomainContains,
+    RecipientCountGt,
+    RecipientCountLt,
+    SizeGt,
+    SizeLt,
+    AttachmentCountGt,
+    HeaderHashMatches,
+    IsPolyUser,
+    IsExternalUser,
+}
+
+data FilterRule : mail v1 {
+    rule_id: bytes(16),
+    mailbox_id: bytes(16),
+    name: string,
+    priority: u32,
+    enabled: bool,
+    condition_type: FilterCondition,
+    condition_value: bytes(256),
+    action_type: FilterAction,
+    action_target: bytes(32),
+    created_at: u64,
+    updated_at: u64,
+    match_count: u64,
+    org_policy: bool,
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail/filter
+    cortex {
+        obfuscate [mailbox_id]
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
+
+data FilterExecution : mail v1 {
+    execution_id: bytes(16),
+    rule_id: bytes(16),
+    email_id: bytes(16),
+    action_taken: FilterAction,
+    matched: bool,
+    executed_at: u64,
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail/filter
+    cortex {
+        obfuscate [email_id]
+        infer on_write
+    }
+
+type EmailMetadata = struct {
+    email_id: bytes(16),
+    sender_domain: bytes(253),
+    sender_is_poly: bool,
+    recipient_count: u8,
+    size_bytes: u64,
+    attachment_count: u8,
+    headers_hash: bytes(32),
+    received_at: u64,
+}
+
+type FilterMatchResult = struct {
+    rule_id: bytes(16),
+    action_type: FilterAction,
+    action_target: bytes(32),
+    priority: u32,
+}
+
+// ── Streams ─────────────────────────────────────────────────────
+
+stream filter_events: event<FilterExecution>
+    retention 90d
+    consumers [governance, audit, streamsight]
+
+// --- Create a new filter rule ---
+circuit create_filter(
+    mailbox_id: bytes(16),
+    name: string,
+    priority: u32,
+    condition_type: FilterCondition,
+    condition_value: bytes(256),
+    action_type: FilterAction,
+    action_target: bytes(32),
+) -> FilterRule
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/filter
+    precision C
+    observe metrics: [filters_created, filter_types]
+    invariant "name_nonempty" { len(name) > 0 }
+    meters [compute_cycles, storage]
+    wasm_abi [random_bytes, eslite_insert, now]
+{
+    let ts = now()
+    let rule_id = random_bytes(16)
+    let rule = FilterRule {
+        rule_id: rule_id,
+        mailbox_id: mailbox_id,
+        name: name,
+        priority: priority,
+        enabled: true,
+        condition_type: condition_type,
+        condition_value: condition_value,
+        action_type: action_type,
+        action_target: action_target,
+        created_at: ts,
+        updated_at: ts,
+        match_count: 0,
+        org_policy: false,
+    }
+    eslite_insert("filter_rules", concat(mailbox_id, rule_id), rule)
+    rule
+}
+
+// --- Update an existing filter rule ---
+circuit update_filter(
+    mailbox_id: bytes(16),
+    rule_id: bytes(16),
+    name: string,
+    priority: u32,
+    enabled: bool,
+    condition_type: FilterCondition,
+    condition_value: bytes(256),
+    action_type: FilterAction,
+    action_target: bytes(32),
+) -> FilterRule
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/filter
+    precision C
+    observe metrics: [filters_updated]
+    invariant "rule_exists" { eslite_exists("filter_rules", concat(mailbox_id, rule_id)) }
+    invariant "not_org_policy" { not eslite_query("filter_rules", concat(mailbox_id, rule_id)).org_policy }
+    meters [compute_cycles]
+    wasm_abi [eslite_query, eslite_insert, now]
+{
+    let existing = eslite_query("filter_rules", concat(mailbox_id, rule_id))
+    let ts = now()
+    let updated = FilterRule {
+        rule_id: rule_id,
+        mailbox_id: mailbox_id,
+        name: name,
+        priority: priority,
+        enabled: enabled,
+        condition_type: condition_type,
+        condition_value: condition_value,
+        action_type: action_type,
+        action_target: action_target,
+        created_at: existing.created_at,
+        updated_at: ts,
+        match_count: existing.match_count,
+        org_policy: existing.org_policy,
+    }
+    eslite_insert("filter_rules", concat(mailbox_id, rule_id), updated)
+    updated
+}
+
+// --- Delete a filter rule ---
+circuit delete_filter(
+    mailbox_id: bytes(16),
+    rule_id: bytes(16),
+) -> bool
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/filter
+    precision C
+    observe metrics: [filters_deleted]
+    invariant "rule_exists" { eslite_exists("filter_rules", concat(mailbox_id, rule_id)) }
+    invariant "not_org_policy" { not eslite_query("filter_rules", concat(mailbox_id, rule_id)).org_policy }
+    meters [compute_cycles]
+    wasm_abi [eslite_delete]
+{
+    eslite_delete("filter_rules", concat(mailbox_id, rule_id))
+    true
+}
+
+// --- Evaluate all filters against incoming email metadata ---
+circuit evaluate_filters(
+    mailbox_id: bytes(16),
+    metadata: EmailMetadata,
+) -> [FilterMatchResult]
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/filter
+    precision C
+    observe metrics: [filter_evaluations, filter_matches, filter_misses, evaluation_latency_ms]
+    monitor "filter_evaluation_latency" { evaluation_latency_ms < 50 }
+    invariant "metadata_only" { metadata.email_id != zero_bytes(16) }
+    property safety "no_plaintext_access" { no_body_access_during(evaluate) }
+    meters [compute_cycles]
+    wasm_abi [eslite_scan, eslite_insert, now]
+{
+    let rules = eslite_scan("filter_rules", mailbox_id)
+    let enabled_rules = filter(rules, |r| r.enabled)
+    let sorted_rules = sort_by(enabled_rules, |r| r.priority)
+    let ts = now()
+
+    let mut matches = []
+    for rule in sorted_rules {
+        let matched = match rule.condition_type {
+            FilterCondition::SenderDomainEquals =>
+                metadata.sender_domain == rule.condition_value,
+            FilterCondition::SenderDomainContains =>
+                contains(metadata.sender_domain, rule.condition_value),
+            FilterCondition::RecipientCountGt =>
+                metadata.recipient_count > decode_u8(rule.condition_value),
+            FilterCondition::RecipientCountLt =>
+                metadata.recipient_count < decode_u8(rule.condition_value),
+            FilterCondition::SizeGt =>
+                metadata.size_bytes > decode_u64(rule.condition_value),
+            FilterCondition::SizeLt =>
+                metadata.size_bytes < decode_u64(rule.condition_value),
+            FilterCondition::AttachmentCountGt =>
+                metadata.attachment_count > decode_u8(rule.condition_value),
+            FilterCondition::HeaderHashMatches =>
+                metadata.headers_hash == bit_slice(rule.condition_value, 0, 256),
+            FilterCondition::IsPolyUser =>
+                metadata.sender_is_poly == true,
+            FilterCondition::IsExternalUser =>
+                metadata.sender_is_poly == false,
+        }
+
+        if matched {
+            matches = append(matches, FilterMatchResult {
+                rule_id: rule.rule_id,
+                action_type: rule.action_type,
+                action_target: rule.action_target,
+                priority: rule.priority,
+            })
+
+            eslite_insert("filter_rules", concat(mailbox_id, rule.rule_id), FilterRule {
+                ...rule,
+                match_count: rule.match_count + 1,
+                updated_at: ts,
+            })
+
+            emit(filter_events, FilterExecution {
+                execution_id: random_bytes(16),
+                rule_id: rule.rule_id,
+                email_id: metadata.email_id,
+                action_taken: rule.action_type,
+                matched: true,
+                executed_at: ts,
+            })
+        }
+    }
+
+    matches
+}
+
+// --- List all filter rules for a mailbox ---
+circuit list_filters(mailbox_id: bytes(16)) -> [FilterRule]
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/filter
+    precision B
+    observe metrics: [filter_list_queries]
+    meters [compute_cycles]
+    wasm_abi [eslite_scan]
+{
+    let rules = eslite_scan("filter_rules", mailbox_id)
+    sort_by(rules, |r| r.priority)
+}
+
+// --- Push an org-wide filter policy (enterprise admin only) ---
+@guard(block_on: admin_only)
+circuit push_org_filter(
+    org_id: bytes(32),
+    mailbox_ids: [bytes(16)],
+    name: string,
+    condition_type: FilterCondition,
+    condition_value: bytes(256),
+    action_type: FilterAction,
+    action_target: bytes(32),
+) -> u32
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/filter
+    precision C
+    observe metrics: [org_filters_pushed, mailboxes_affected]
+    invariant "has_admin_role" { check_org_admin(org_id) }
+    meters [compute_cycles, storage]
+    wasm_abi [random_bytes, eslite_insert, now]
+{
+    let ts = now()
+    let mut count = 0
+    for mailbox_id in mailbox_ids {
+        let rule_id = random_bytes(16)
+        let rule = FilterRule {
+            rule_id: rule_id,
+            mailbox_id: mailbox_id,
+            name: concat("[Org] ", name),
+            priority: 0,
+            enabled: true,
+            condition_type: condition_type,
+            condition_value: condition_value,
+            action_type: action_type,
+            action_target: action_target,
+            created_at: ts,
+            updated_at: ts,
+            match_count: 0,
+            org_policy: true,
+        }
+        eslite_insert("filter_rules", concat(mailbox_id, rule_id), rule)
+        count = count + 1
+    }
+    count
+}
+
+// ── Monitors ─────────────────────────────────────────────────────
+
+monitor "filter_evaluation_rate" {
+    assert metric("filter_evaluations_per_sec") > 0
+    window 60s
+    severity warning
+}
+
+// ── Golden Tests ─────────────────────────────────────────────────
+
+test golden "create_and_evaluate_domain_filter" {
+    input {
+        mailbox_id: bytes(16, 0xAA)
+        name: "Block spam domain"
+        condition_type: FilterCondition::SenderDomainEquals
+        condition_value: bytes("spam-domain.xyz")
+        action_type: FilterAction::MarkSpam
+        action_target: bytes(32)
+    }
+    assert {
+        let rule = create_filter(mailbox_id, name, 1, condition_type, condition_value, action_type, action_target)
+        rule.enabled == true
+        let metadata = EmailMetadata {
+            email_id: bytes(16, 0xBB),
+            sender_domain: bytes("spam-domain.xyz"),
+            sender_is_poly: false,
+            recipient_count: 1,
+            size_bytes: 4096,
+            attachment_count: 0,
+            headers_hash: bytes(32, 0xCC),
+            received_at: 1700000000000,
+        }
+        let matches = evaluate_filters(mailbox_id, metadata)
+        len(matches) == 1
+        matches[0].action_type == FilterAction::MarkSpam
+    }
+}
+
+test golden "filter_no_match" {
+    input {
+        mailbox_id: bytes(16, 0xDD)
+    }
+    assert {
+        let rule = create_filter(mailbox_id, "Size filter", 1, FilterCondition::SizeGt, encode_u64(1048576), FilterAction::ApplyLabel, bytes(32, 0x01))
+        let metadata = EmailMetadata {
+            email_id: bytes(16, 0xEE),
+            sender_domain: bytes("example.com"),
+            sender_is_poly: true,
+            recipient_count: 1,
+            size_bytes: 512,
+            attachment_count: 0,
+            headers_hash: bytes(32, 0xFF),
+            received_at: 1700000000000,
+        }
+        let matches = evaluate_filters(mailbox_id, metadata)
+        len(matches) == 0
+    }
+}
+
+fuzz_target "filter_evaluation_fuzz" {
+    inputs {
+        mailbox_id: bytes(16)
+        sender_domain: bytes(1..253)
+        recipient_count: u8
+        size_bytes: u64
+        attachment_count: u8
+    }
+    assert {
+        no_panic
+    }
+}

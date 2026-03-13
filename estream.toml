@@ -1,0 +1,35 @@
+[platform]
+version = "0.11.0"
+min_version = "0.11.0"
+
+[component]
+name = "polymail"
+version = "0.2.0"
+description = "PQ encrypted email with scatter-stored mailbox, SMTP bridge, and ESLM classification"
+
+[compiler]
+target = ["wasm32-wasi", "native"]
+optimization = "size"
+strip = true
+
+[stratum]
+default_store = "kv"
+graph_store = "csr"
+dag_store = "merkle_csr"
+
+[cortex]
+default_alert_channel = "mail-team"
+anomaly_detection = true
+drift_threshold = 0.10
+
+[signing]
+algorithm = "ml-dsa-87"
+key_size = 4896
+signature_size = 4627
+pubkey_size = 2592
+
+[scatter]
+default_k = 3
+default_n = 5
+min_k = 3
+max_n = 32

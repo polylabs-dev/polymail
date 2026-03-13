@@ -1,0 +1,431 @@
+// Poly Mail Calendar — iCalendar invite handling (v0.11.0)
+//
+// Parses and processes iCalendar (RFC 5545) invitations embedded in emails.
+// Supports VEVENT, VTODO, and VFREEBUSY components. RSVP responses are
+// PQ-signed and routed through the Poly Mail delivery path.
+//
+// Privacy: calendar data is E2E encrypted like email body content.
+// Free/busy queries use blinded time-slot proofs — the server learns
+// only that a slot is free or busy, never the event details.
+//
+// Enterprise: org-wide calendar policies (auto-accept from domain,
+// resource booking) are governed via lex.
+
+import polykit_identity
+import polykit_metering
+import polymail_encrypt
+
+type EventStatus = enum {
+    Tentative,
+    Confirmed,
+    Cancelled,
+}
+
+type RsvpStatus = enum {
+    NeedsAction,
+    Accepted,
+    Declined,
+    Tentative,
+    Delegated,
+}
+
+type RecurrenceFreq = enum {
+    Daily,
+    Weekly,
+    Monthly,
+    Yearly,
+}
+
+data CalendarEvent : mail v1 {
+    event_id: bytes(16),
+    email_id: bytes(16),
+    mailbox_id: bytes(16),
+    organizer_id: bytes(16),
+    summary_hash: bytes(32),
+    location_hash: bytes(32),
+    dtstart: u64,
+    dtend: u64,
+    all_day: bool,
+    status: EventStatus,
+    sequence: u32,
+    recurrence_rule: bytes(128),
+    created_at: u64,
+    updated_at: u64,
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail/calendar
+    cortex {
+        obfuscate [organizer_id, mailbox_id]
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
+
+data CalendarAttendee : mail v1 {
+    attendee_id: bytes(16),
+    event_id: bytes(16),
+    user_id: bytes(16),
+    rsvp_status: RsvpStatus,
+    role: u8,
+    responded_at: u64,
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail/calendar
+    cortex {
+        obfuscate [user_id]
+        infer on_write
+    }
+
+data FreeBusySlot : mail v1 {
+    slot_id: bytes(16),
+    mailbox_id: bytes(16),
+    start_time: u64,
+    end_time: u64,
+    busy: bool,
+    blinded_proof: bytes(32),
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail/calendar
+    cortex {
+        obfuscate [mailbox_id, blinded_proof]
+        infer on_write
+    }
+
+type ICalPayload = struct {
+    raw_ical: bytes,
+    method: bytes(16),
+    component_type: bytes(16),
+    uid: bytes(128),
+    sequence: u32,
+}
+
+type RsvpResponse = struct {
+    event_id: bytes(16),
+    attendee_id: bytes(16),
+    status: RsvpStatus,
+    comment_hash: bytes(32),
+    signature: bytes(4627),
+}
+
+// ── Streams ─────────────────────────────────────────────────────
+
+stream calendar_events: event<CalendarEvent>
+    retention 365d
+    consumers [governance, audit, streamsight]
+
+stream rsvp_events: event<CalendarAttendee>
+    retention 90d
+    consumers [streamsight, mail_team]
+
+// --- Parse iCalendar payload from email and create event ---
+circuit process_invite(
+    mailbox_id: bytes(16),
+    email_id: bytes(16),
+    ical_payload: ICalPayload,
+    organizer_id: bytes(16),
+    attendee_ids: [bytes(16)],
+) -> CalendarEvent
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/calendar
+    precision C
+    observe metrics: [invites_processed, events_created, recurring_events]
+    monitor "invite_processing_latency" { processing_latency_ms < 500 }
+    invariant "valid_ical" { len(ical_payload.raw_ical) > 0 }
+    invariant "valid_method" { ical_payload.method == bytes("REQUEST") or ical_payload.method == bytes("CANCEL") }
+    meters [compute_cycles, storage]
+    wasm_abi [random_bytes, eslite_insert, eslite_query, now]
+{
+    let ts = now()
+    let parsed = ical_parse(ical_payload.raw_ical)
+
+    if ical_payload.method == bytes("CANCEL") {
+        let existing = eslite_query("calendar_events", ical_payload.uid)
+        if existing != null {
+            eslite_insert("calendar_events", ical_payload.uid, CalendarEvent {
+                ...existing,
+                status: EventStatus::Cancelled,
+                sequence: ical_payload.sequence,
+                updated_at: ts,
+            })
+            return existing
+        }
+    }
+
+    let event_id = random_bytes(16)
+    let event = CalendarEvent {
+        event_id: event_id,
+        email_id: email_id,
+        mailbox_id: mailbox_id,
+        organizer_id: organizer_id,
+        summary_hash: blake3(parsed.summary),
+        location_hash: blake3(parsed.location),
+        dtstart: parsed.dtstart,
+        dtend: parsed.dtend,
+        all_day: parsed.all_day,
+        status: EventStatus::Tentative,
+        sequence: ical_payload.sequence,
+        recurrence_rule: parsed.rrule,
+        created_at: ts,
+        updated_at: ts,
+    }
+    eslite_insert("calendar_events", event_id, event)
+
+    for attendee_id in attendee_ids {
+        let att = CalendarAttendee {
+            attendee_id: random_bytes(16),
+            event_id: event_id,
+            user_id: attendee_id,
+            rsvp_status: RsvpStatus::NeedsAction,
+            role: 1,
+            responded_at: 0,
+        }
+        eslite_insert("calendar_attendees", concat(event_id, attendee_id), att)
+    }
+
+    emit(calendar_events, event)
+    event
+}
+
+// --- Respond to a calendar invite (RSVP) ---
+circuit rsvp_respond(
+    mailbox_id: bytes(16),
+    event_id: bytes(16),
+    user_id: bytes(16),
+    status: RsvpStatus,
+    comment_hash: bytes(32),
+    signing_sk: bytes(4896),
+) -> RsvpResponse
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/calendar
+    precision C
+    constant_time true
+    observe metrics: [rsvp_responses, rsvp_accepted, rsvp_declined, rsvp_tentative]
+    invariant "event_exists" { eslite_exists("calendar_events", event_id) }
+    invariant "attendee_exists" { eslite_exists("calendar_attendees", concat(event_id, user_id)) }
+    property safety "rsvp_is_signed" { len(signature) == 4627 }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [eslite_query, eslite_insert, mldsa_sign, now]
+{
+    let ts = now()
+    let attendee = eslite_query("calendar_attendees", concat(event_id, user_id))
+    let updated = CalendarAttendee {
+        ...attendee,
+        rsvp_status: status,
+        responded_at: ts,
+    }
+    eslite_insert("calendar_attendees", concat(event_id, user_id), updated)
+
+    let content = concat(event_id, user_id, encode_u8(status), comment_hash, encode_u64(ts))
+    let signature = mldsa_sign(signing_sk, sha3_256(content))
+
+    emit(rsvp_events, updated)
+
+    RsvpResponse {
+        event_id: event_id,
+        attendee_id: attendee.attendee_id,
+        status: status,
+        comment_hash: comment_hash,
+        signature: signature,
+    }
+}
+
+// --- Query free/busy for a mailbox (blinded time-slot proof) ---
+circuit query_free_busy(
+    mailbox_id: bytes(16),
+    start_time: u64,
+    end_time: u64,
+    user_search_key: bytes(32),
+) -> [FreeBusySlot]
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/calendar
+    precision C
+    observe metrics: [freebusy_queries, slots_returned]
+    invariant "valid_range" { start_time < end_time }
+    property safety "no_event_details_leaked" { all_slots_blinded(result) }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [eslite_scan, now]
+{
+    let events = eslite_scan("calendar_events", mailbox_id)
+    let slot_duration = 1800000
+
+    let mut slots = []
+    let mut cursor = start_time
+    while cursor < end_time {
+        let slot_end = cursor + slot_duration
+        let busy = any(events, |e| {
+            e.status != EventStatus::Cancelled and
+            e.dtstart < slot_end and
+            e.dtend > cursor
+        })
+        let proof = hkdf_blind("poly-mail-freebusy-v1", user_search_key, concat(mailbox_id, encode_u64(cursor)))
+        slots = append(slots, FreeBusySlot {
+            slot_id: blake3(concat(mailbox_id, encode_u64(cursor))),
+            mailbox_id: mailbox_id,
+            start_time: cursor,
+            end_time: slot_end,
+            busy: busy,
+            blinded_proof: proof,
+        })
+        cursor = slot_end
+    }
+    slots
+}
+
+// --- List events for a mailbox in a time range ---
+circuit list_events(
+    mailbox_id: bytes(16),
+    start_time: u64,
+    end_time: u64,
+) -> [CalendarEvent]
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/calendar
+    precision B
+    observe metrics: [event_list_queries, events_returned]
+    invariant "valid_range" { start_time < end_time }
+    meters [compute_cycles]
+    wasm_abi [eslite_scan]
+{
+    let events = eslite_scan("calendar_events", mailbox_id)
+    let filtered = filter(events, |e| {
+        e.dtstart < end_time and e.dtend > start_time and
+        e.status != EventStatus::Cancelled
+    })
+    sort_by(filtered, |e| e.dtstart)
+}
+
+// --- Get attendees and their RSVP status for an event ---
+circuit get_attendees(event_id: bytes(16)) -> [CalendarAttendee]
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/calendar
+    precision B
+    observe metrics: [attendee_queries, attendee_count]
+    meters [compute_cycles]
+    wasm_abi [eslite_scan]
+{
+    eslite_scan("calendar_attendees", event_id)
+}
+
+// --- Cancel an event (organizer only) ---
+circuit cancel_event(
+    event_id: bytes(16),
+    organizer_id: bytes(16),
+    signing_sk: bytes(4896),
+) -> CalendarEvent
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/calendar
+    precision C
+    constant_time true
+    observe metrics: [events_cancelled]
+    invariant "event_exists" { eslite_exists("calendar_events", event_id) }
+    invariant "is_organizer" { eslite_query("calendar_events", event_id).organizer_id == organizer_id }
+    meters [compute_cycles]
+    wasm_abi [eslite_query, eslite_insert, mldsa_sign, now]
+{
+    let ts = now()
+    let event = eslite_query("calendar_events", event_id)
+    let cancelled = CalendarEvent {
+        ...event,
+        status: EventStatus::Cancelled,
+        sequence: event.sequence + 1,
+        updated_at: ts,
+    }
+    let content = concat(event_id, encode_u8(EventStatus::Cancelled), encode_u64(ts))
+    let _sig = mldsa_sign(signing_sk, sha3_256(content))
+    eslite_insert("calendar_events", event_id, cancelled)
+    emit(calendar_events, cancelled)
+    cancelled
+}
+
+// ── Monitors ─────────────────────────────────────────────────────
+
+monitor "invite_processing_rate" {
+    assert metric("invites_processed_per_sec") > 0
+    window 60s
+    severity warning
+}
+
+// ── Golden Tests ─────────────────────────────────────────────────
+
+test golden "process_invite_and_rsvp" {
+    input {
+        mailbox_id: bytes(16, 0xAA)
+        email_id: bytes(16, 0xBB)
+        organizer_id: bytes(16, 0xCC)
+        attendee_ids: [bytes(16, 0xDD)]
+        ical_payload: ICalPayload {
+            raw_ical: bytes("BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nSUMMARY:Team Standup\r\nEND:VEVENT\r\nEND:VCALENDAR"),
+            method: bytes("REQUEST"),
+            component_type: bytes("VEVENT"),
+            uid: bytes("event-001@polylabs.dev"),
+            sequence: 0,
+        }
+        signing_sk: test_key("attendee_mldsa_sk")
+    }
+    assert {
+        let event = process_invite(mailbox_id, email_id, ical_payload, organizer_id, attendee_ids)
+        event.status == EventStatus::Tentative
+        event.organizer_id == organizer_id
+        let rsvp = rsvp_respond(mailbox_id, event.event_id, bytes(16, 0xDD), RsvpStatus::Accepted, bytes(32), signing_sk)
+        rsvp.status == RsvpStatus::Accepted
+        len(rsvp.signature) == 4627
+    }
+}
+
+test golden "cancel_event_updates_status" {
+    input {
+        mailbox_id: bytes(16, 0xAA)
+        email_id: bytes(16, 0xBB)
+        organizer_id: bytes(16, 0xCC)
+        signing_sk: test_key("organizer_mldsa_sk")
+    }
+    assert {
+        let event = process_invite(mailbox_id, email_id, ICalPayload {
+            raw_ical: bytes("BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nSUMMARY:Cancelled Meeting\r\nEND:VEVENT\r\nEND:VCALENDAR"),
+            method: bytes("REQUEST"),
+            component_type: bytes("VEVENT"),
+            uid: bytes("event-002@polylabs.dev"),
+            sequence: 0,
+        }, organizer_id, [])
+        let cancelled = cancel_event(event.event_id, organizer_id, signing_sk)
+        cancelled.status == EventStatus::Cancelled
+        cancelled.sequence == 1
+    }
+}
+
+test golden "freebusy_blinded" {
+    input {
+        mailbox_id: bytes(16, 0xEE)
+        start_time: 1700000000000
+        end_time: 1700003600000
+        user_search_key: bytes(32, 0xFF)
+    }
+    assert {
+        let slots = query_free_busy(mailbox_id, start_time, end_time, user_search_key)
+        len(slots) > 0
+        slots[0].blinded_proof != zero_bytes(32)
+    }
+}
+
+fuzz_target "invite_processing_fuzz" {
+    inputs {
+        raw_ical: bytes(1..65536)
+        method: bytes(1..16)
+        organizer_id: bytes(16)
+        attendee_ids: list<bytes(16)>(0..20)
+    }
+    assert {
+        no_panic
+    }
+}
+
+fuzz_target "rsvp_signing_fuzz" {
+    inputs {
+        event_id: bytes(16)
+        user_id: bytes(16)
+        status: u8(0..4)
+        signing_sk: bytes(4896)
+    }
+    assert {
+        no_panic
+        constant_time true
+    }
+}

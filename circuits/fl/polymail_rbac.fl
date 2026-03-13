@@ -1,0 +1,420 @@
+// Poly Mail RBAC — Role-based access control for mailbox operations (v0.11.0)
+//
+// Lex Architecture:
+//   esn/global/org/polylabs/mail/rbac
+//   Fine-grained RBAC with role hierarchy: Owner > Admin > Member > ReadOnly
+//   Composes eStream's rbac.fl for bitmask permission resolution with role inheritance.
+//
+// Permission bitmask:
+//   bit 0: can_read         (0x01) — view mailbox, read emails
+//   bit 1: can_send         (0x02) — compose and send emails
+//   bit 2: can_manage       (0x04) — create folders, labels, filters
+//   bit 3: can_admin        (0x08) — manage roles, domains, settings
+//   bit 4: can_share        (0x10) — share folders with other mailboxes
+//   bit 5: can_delete       (0x20) — permanently delete emails
+//   bit 6: can_export       (0x40) — export mailbox data
+//   bit 7: can_delegate     (0x80) — send-as / delegate access
+
+import polykit_identity
+import polykit_metering
+
+import estream.circuits.core.data.graphs.rbac
+import estream.circuits.core.data.graphs.group_hierarchy
+
+// ── Role definitions ────────────────────────────────────────────
+
+type MailRole = enum {
+    Owner,
+    Admin,
+    Member,
+    ReadOnly,
+}
+
+// ── Data declarations ───────────────────────────────────────────
+
+data MailUser : mail v1 {
+    user_id: bytes(32),
+    pubkey: bytes(2592),
+    display_name: string,
+    email: string,
+    role: MailRole,
+    permissions: u64,
+    active: bool,
+    created_at: u64,
+    last_active_at: u64,
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail/rbac
+    cortex {
+        redact [email, pubkey]
+        obfuscate [user_id]
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
+
+data MailboxInfo : mail v1 {
+    mailbox_id: bytes(32),
+    owner_id: bytes(32),
+    domain: string,
+    org_id: bytes(32),
+    created_at: u64,
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail/rbac
+    cortex {
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
+
+data MailRoleAssignment : mail v1 {
+    assignment_id: bytes(16),
+    user_id: bytes(32),
+    mailbox_id: bytes(32),
+    role: MailRole,
+    permissions: u64,
+    granted_by: bytes(32),
+    granted_at: u64,
+    expires_at: u64,
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail/rbac
+    cortex {
+        redact [granted_by]
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
+
+data DelegateAccess : mail v1 {
+    delegate_id: bytes(16),
+    grantor_mailbox_id: bytes(32),
+    delegate_user_id: bytes(32),
+    can_send_as: bool,
+    can_read: bool,
+    can_manage: bool,
+    granted_at: u64,
+    expires_at: u64,
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail/rbac
+    cortex {
+        obfuscate [delegate_user_id]
+        infer on_write
+        on_anomaly alert "mail-security"
+    }
+
+// ── RBAC Graph ──────────────────────────────────────────────────
+
+graph mail_roles {
+    node User : MailUser
+    node Mailbox : MailboxInfo
+
+    edge owns : User -> Mailbox
+    edge accesses : User -> Mailbox
+    edge delegates : User -> User
+
+    overlay permissions on User {
+        can_send,
+        can_manage,
+        can_admin,
+        can_share,
+    }
+
+    storage csr {
+        tier bram { capacity: 10_000 },
+        tier ddr { capacity: 1_000_000 },
+    }
+
+    sign ml_dsa_87
+
+    ai_feed access_patterns
+}
+
+// ── Role permission map ─────────────────────────────────────────
+
+const OWNER_PERMISSIONS: u64 = 0xFF
+const ADMIN_PERMISSIONS: u64 = 0x7F
+const MEMBER_PERMISSIONS: u64 = 0x27
+const READONLY_PERMISSIONS: u64 = 0x01
+
+// ── Streams ─────────────────────────────────────────────────────
+
+stream rbac_events: event<MailRoleAssignment>
+    retention 7y
+    consumers [governance, audit, streamsight]
+
+stream delegate_events: event<DelegateAccess>
+    retention 7y
+    consumers [governance, audit, streamsight]
+
+// ── Circuits ────────────────────────────────────────────────────
+
+@guard(block_on: role_assignment_limit_exceeded)
+circuit assign_role(
+    granter: bytes(32),
+    granter_pubkey: bytes(2592),
+    user_id: bytes(32),
+    mailbox_id: bytes(32),
+    role: MailRole,
+    signing_sk: bytes(4896),
+    expires_at: u64,
+) -> MailRoleAssignment
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/rbac
+    precision C
+    constant_time true
+    observe metrics: [roles_assigned, role_type, mailbox_assignments]
+    monitor "role_assignment_rate" { roles_assigned < 200 per 3600s }
+    invariant "granter_authorized" { has_admin_permission(granter, mailbox_id) }
+    invariant "user_exists" { user_id != zero_bytes(32) }
+    invariant "valid_expiry" { expires_at == 0 or expires_at > now() }
+    property safety "granter_must_be_admin" { has_admin_permission(granter, mailbox_id) }
+    property liveness "assignment_eventually_stored" { eventually(eslite_exists("mail_role_assignments", assignment_id)) }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [eslite_insert, eslite_query, mldsa_sign, now]
+{
+    let ts = now()
+    let permissions = match role {
+        MailRole::Owner => OWNER_PERMISSIONS,
+        MailRole::Admin => ADMIN_PERMISSIONS,
+        MailRole::Member => MEMBER_PERMISSIONS,
+        MailRole::ReadOnly => READONLY_PERMISSIONS,
+    }
+    let seed = concat(granter, user_id, mailbox_id, encode_u64(ts))
+    let assignment_id = bit_slice(sha3_256(seed), 0, 128)
+    let assignment = MailRoleAssignment {
+        assignment_id: assignment_id,
+        user_id: user_id,
+        mailbox_id: mailbox_id,
+        role: role,
+        permissions: permissions,
+        granted_by: granter,
+        granted_at: ts,
+        expires_at: expires_at,
+    }
+    let content = concat(assignment_id, user_id, mailbox_id, encode_u64(permissions), encode_u64(ts))
+    let signature = mldsa_sign(signing_sk, sha3_256(content))
+    eslite_insert("mail_role_assignments", concat(user_id, mailbox_id), assignment)
+    rbac.assign_role(eslite_query("rbac_graph_id"), user_id, mailbox_id, permissions)
+    emit(rbac_events, assignment)
+    assignment
+}
+
+circuit revoke_role(
+    revoker: bytes(32),
+    user_id: bytes(32),
+    mailbox_id: bytes(32),
+) -> bool
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/rbac
+    precision C
+    observe metrics: [roles_revoked]
+    monitor "role_revocation_rate" { roles_revoked < 100 per 3600s }
+    invariant "revoker_authorized" { has_admin_permission(revoker, mailbox_id) }
+    invariant "assignment_exists" { eslite_exists("mail_role_assignments", concat(user_id, mailbox_id)) }
+    property safety "revocation_removes_permissions" { not eslite_exists("mail_role_assignments", concat(user_id, mailbox_id)) }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [eslite_delete, eslite_query, now]
+{
+    eslite_delete("mail_role_assignments", concat(user_id, mailbox_id))
+    rbac.revoke_role(eslite_query("rbac_graph_id"), user_id, mailbox_id)
+    true
+}
+
+circuit check_permission(
+    user_id: bytes(32),
+    mailbox_id: bytes(32),
+    permission_bit: u64,
+) -> bool
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/rbac
+    precision C
+    observe metrics: [permission_checks, permission_grants, permission_denials]
+    monitor "permission_denial_rate" { permission_denials < 200 per 60s }
+    invariant "valid_permission_bit" { permission_bit > 0 }
+    property safety "expired_assignment_denied" { assignment.expires_at > 0 and assignment.expires_at < now() implies result == false }
+    meters [compute_cycles]
+    wasm_abi [eslite_query, now]
+{
+    let assignment = eslite_query("mail_role_assignments", concat(user_id, mailbox_id))
+    if assignment == null { return false }
+    if assignment.expires_at > 0 and assignment.expires_at < now() { return false }
+    (assignment.permissions & permission_bit) == permission_bit
+}
+
+circuit resolve_effective_permissions(
+    user_id: bytes(32),
+    mailbox_id: bytes(32),
+) -> u64
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/rbac
+    precision C
+    observe metrics: [permission_resolutions, inheritance_depth]
+    monitor "resolution_latency" { resolution_time_ms < 50 }
+    invariant "user_nonzero" { user_id != zero_bytes(32) }
+    property safety "permissions_monotonic_up_hierarchy" { effective >= direct_permissions }
+    property liveness "resolution_completes" { eventually(effective >= 0) }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [eslite_query, eslite_scan]
+{
+    let direct = eslite_query("mail_role_assignments", concat(user_id, mailbox_id))
+    let direct_permissions = if direct != null and (direct.expires_at == 0 or direct.expires_at > now()) {
+        direct.permissions
+    } else {
+        0
+    }
+    let mailbox_node = eslite_query("mailbox_nodes", mailbox_id)
+    if mailbox_node == null { return direct_permissions }
+    let org_assignment = eslite_query("mail_role_assignments", concat(user_id, mailbox_node.org_id))
+    let org_permissions = if org_assignment != null and (org_assignment.expires_at == 0 or org_assignment.expires_at > now()) {
+        org_assignment.permissions
+    } else {
+        0
+    }
+    let effective = direct_permissions | org_permissions
+    effective
+}
+
+circuit grant_delegate_access(
+    granter: bytes(32),
+    granter_mailbox_id: bytes(32),
+    delegate_user_id: bytes(32),
+    can_send_as: bool,
+    can_read: bool,
+    can_manage: bool,
+    signing_sk: bytes(4896),
+    expires_at: u64,
+) -> DelegateAccess
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/rbac
+    precision C
+    constant_time true
+    observe metrics: [delegates_granted, send_as_grants, read_grants]
+    invariant "granter_is_owner" { has_owner_permission(granter, granter_mailbox_id) }
+    invariant "not_self_delegate" { granter != delegate_user_id }
+    property safety "delegate_cannot_exceed_owner" { delegate_permissions <= owner_permissions }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [eslite_insert, mldsa_sign, now]
+{
+    let ts = now()
+    let seed = concat(granter, delegate_user_id, granter_mailbox_id, encode_u64(ts))
+    let delegate_id = bit_slice(sha3_256(seed), 0, 128)
+    let access = DelegateAccess {
+        delegate_id: delegate_id,
+        grantor_mailbox_id: granter_mailbox_id,
+        delegate_user_id: delegate_user_id,
+        can_send_as: can_send_as,
+        can_read: can_read,
+        can_manage: can_manage,
+        granted_at: ts,
+        expires_at: expires_at,
+    }
+    let content = concat(delegate_id, granter_mailbox_id, delegate_user_id, encode_u64(ts))
+    let signature = mldsa_sign(signing_sk, sha3_256(content))
+    eslite_insert("mail_delegates", concat(granter_mailbox_id, delegate_user_id), access)
+    emit(delegate_events, access)
+    access
+}
+
+circuit revoke_delegate_access(
+    revoker: bytes(32),
+    grantor_mailbox_id: bytes(32),
+    delegate_user_id: bytes(32),
+) -> bool
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/rbac
+    precision C
+    observe metrics: [delegates_revoked]
+    invariant "revoker_is_owner" { has_owner_permission(revoker, grantor_mailbox_id) }
+    meters [compute_cycles]
+    wasm_abi [eslite_delete]
+{
+    eslite_delete("mail_delegates", concat(grantor_mailbox_id, delegate_user_id))
+    true
+}
+
+// ── Test annotations ────────────────────────────────────────────
+
+test golden "assign_member_role" {
+    input {
+        granter: hex("aa" * 32)
+        granter_pubkey: hex("bb" * 2592)
+        user_id: hex("cc" * 32)
+        mailbox_id: hex("dd" * 32)
+        role: MailRole::Member
+        signing_sk: hex("ee" * 4896)
+        expires_at: 0
+    }
+    assert {
+        result.user_id == hex("cc" * 32)
+        result.mailbox_id == hex("dd" * 32)
+        result.role == MailRole::Member
+        result.permissions == 0x27
+        result.granted_at > 0
+    }
+}
+
+test golden "check_permission_send" {
+    setup {
+        assign_role(hex("aa" * 32), hex("bb" * 2592), hex("cc" * 32), hex("dd" * 32), MailRole::Member, hex("ee" * 4896), 0)
+    }
+    input {
+        user_id: hex("cc" * 32)
+        mailbox_id: hex("dd" * 32)
+        permission_bit: 0x02
+    }
+    assert {
+        result == true
+    }
+}
+
+test golden "check_permission_admin_denied" {
+    setup {
+        assign_role(hex("aa" * 32), hex("bb" * 2592), hex("cc" * 32), hex("dd" * 32), MailRole::Member, hex("ee" * 4896), 0)
+    }
+    input {
+        user_id: hex("cc" * 32)
+        mailbox_id: hex("dd" * 32)
+        permission_bit: 0x08
+    }
+    assert {
+        result == false
+    }
+}
+
+test golden "readonly_cannot_send" {
+    setup {
+        assign_role(hex("aa" * 32), hex("bb" * 2592), hex("cc" * 32), hex("dd" * 32), MailRole::ReadOnly, hex("ee" * 4896), 0)
+    }
+    input {
+        user_id: hex("cc" * 32)
+        mailbox_id: hex("dd" * 32)
+        permission_bit: 0x02
+    }
+    assert {
+        result == false
+    }
+}
+
+fuzz_target "rbac_assignment_fuzz" {
+    inputs {
+        granter: bytes(32)
+        user_id: bytes(32)
+        mailbox_id: bytes(32)
+        role: u8(0..3)
+        expires_at: u64
+    }
+    assert {
+        no_panic
+    }
+}
+
+fuzz_target "permission_resolution_fuzz" {
+    inputs {
+        user_id: bytes(32)
+        mailbox_id: bytes(32)
+    }
+    assert {
+        no_panic
+        result >= 0
+    }
+}

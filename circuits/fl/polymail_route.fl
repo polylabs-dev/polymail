@@ -1,4 +1,4 @@
-// Poly Mail Route — Email routing through scatter-CAS with MX gateway
+// Poly Mail Route — Email routing through scatter-CAS with MX gateway (v0.11.0)
 //
 // Internal (Poly-to-Poly): Direct scatter-CAS delivery. Email is
 // already ML-KEM-1024 encrypted; scatter into k-of-n erasure shards
@@ -25,7 +25,7 @@ type RoutingDecision = enum {
     Rejected,
 }
 
-type DeliveryStatus = struct {
+data DeliveryStatus : mail v1 {
     email_id: bytes(16),
     recipient: MailboxAddress,
     decision: RoutingDecision,
@@ -35,6 +35,13 @@ type DeliveryStatus = struct {
     attempt: u8,
     error_code: u16,
 }
+    store kv
+    govern lex esn/global/org/polylabs/mail/route
+    cortex {
+        obfuscate [email_id]
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
 
 type MxRecord = struct {
     domain: bytes(253),
@@ -59,10 +66,12 @@ circuit route_outbound(
 ) -> [DeliveryStatus]
     profile poly_framework_standard
     lex esn/global/org/polylabs/mail/route
+    precision C
     observe metrics: [outbound_routed, scatter_deliveries, mx_deliveries, routing_failures]
     monitor "routing_latency" { routing_latency_ms < 500 }
     invariant "valid_scatter_config" { scatter_config_k <= scatter_config_n }
     invariant "recipients_nonempty" { len(recipients) >= 1 }
+    property safety "all_recipients_get_status" { len(result) == len(recipients) }
     meters [compute_cycles, bandwidth]
     wasm_abi [scatter_store, quic_notify, dns_resolve, now]
 {
@@ -105,6 +114,7 @@ circuit route_inbound(
 ) -> DeliveryStatus
     profile poly_framework_standard
     lex esn/global/org/polylabs/mail/route
+    precision C
     observe metrics: [inbound_routed, inbound_scatter, inbound_mx]
     meters [compute_cycles, bandwidth]
     wasm_abi [scatter_retrieve, now]
@@ -131,6 +141,7 @@ circuit route_inbound(
 circuit resolve_mx(domain: bytes(253)) -> MxRecord
     profile poly_framework_standard
     lex esn/global/org/polylabs/mail/route
+    precision C
     observe metrics: [mx_lookups, mx_failures, pq_tls_capable]
     monitor "mx_resolution_time" { mx_resolve_ms < 2000 }
     wasm_abi [dns_resolve]
@@ -149,6 +160,7 @@ circuit resolve_mx(domain: bytes(253)) -> MxRecord
 circuit deliver_local(recipient: MailboxAddress, email_hash: bytes(32)) -> DeliveryStatus
     profile poly_framework_standard
     lex esn/global/org/polylabs/mail/route
+    precision C
     observe metrics: [local_deliveries]
     wasm_abi [eslite_insert, now]
 {
@@ -174,6 +186,7 @@ circuit deliver_remote(
 ) -> DeliveryStatus
     profile poly_framework_sensitive
     lex esn/global/org/polylabs/mail/route
+    precision C
     observe metrics: [remote_deliveries, remote_failures, tls_upgrades]
     monitor "remote_delivery_time" { delivery_ms < 10000 }
     meters [bandwidth]

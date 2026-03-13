@@ -1,0 +1,334 @@
+// Poly Mail Search — Encrypted search index, on-device only (v0.11.0)
+//
+// All search operations execute client-side in WASM. The search index is
+// built and stored locally using ESLite. No search queries, index data,
+// or results ever leave the device. Server has zero knowledge of search
+// terms, patterns, or results.
+//
+// Index strategy:
+//   1. On email receive/decrypt: extract tokens from subject + body
+//   2. Blind each token with HKDF("poly-mail-search-v1", user_secret)
+//   3. Insert blinded token → email_id mapping into local ESLite
+//   4. On search: blind the query tokens, look up in ESLite
+//
+// This ensures the search index is opaque even if the device storage
+// is compromised without the user's key material.
+
+import polykit_identity
+import polykit_metering
+
+data SearchIndex : mail v1 {
+    index_id: bytes(16),
+    mailbox_id: bytes(16),
+    token_count: u64,
+    last_indexed_at: u64,
+    index_version: u32,
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail/search
+    cortex {
+        obfuscate [mailbox_id]
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
+
+data SearchToken : mail v1 {
+    blinded_token: bytes(32),
+    email_id: bytes(16),
+    field: u8,
+    position: u32,
+    indexed_at: u64,
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail/search
+    cortex {
+        obfuscate [blinded_token, email_id]
+        infer on_write
+    }
+
+type SearchQuery = struct {
+    query_tokens: [bytes(32)],
+    mailbox_id: bytes(16),
+    max_results: u32,
+    date_from: u64,
+    date_to: u64,
+}
+
+type SearchResult = struct {
+    email_id: bytes(16),
+    relevance_score: f32,
+    matched_fields: [u8],
+    snippet_hash: bytes(32),
+}
+
+type SearchResultSet = struct {
+    results: [SearchResult],
+    total_matches: u32,
+    query_time_ms: u32,
+    index_version: u32,
+}
+
+type IndexField = enum {
+    Subject,
+    Body,
+    From,
+    To,
+    Attachment,
+}
+
+// --- Index a decrypted email into the local search index ---
+circuit index_email(
+    mailbox_id: bytes(16),
+    email_id: bytes(16),
+    subject: bytes,
+    body: bytes,
+    from_addr: bytes(254),
+    to_addrs: [bytes(254)],
+    user_search_key: bytes(32),
+) -> u32
+    profile poly_framework_sensitive
+    lex esn/global/org/polylabs/mail/search
+    precision C
+    constant_time true
+    observe metrics: [emails_indexed, tokens_indexed, index_latency_ms]
+    monitor "index_latency" { index_latency_ms < 500 }
+    invariant "local_only" { is_local_execution() }
+    invariant "key_present" { user_search_key != zero_bytes(32) }
+    property safety "no_plaintext_stored" { all_tokens_blinded(stored_tokens) }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [eslite_insert, now]
+{
+    let ts = now()
+    let mut token_count = 0
+
+    let subject_tokens = tokenize(subject)
+    for (pos, token) in enumerate(subject_tokens) {
+        let blinded = hkdf_blind("poly-mail-search-v1", user_search_key, token)
+        eslite_insert("search_tokens", concat(mailbox_id, blinded), SearchToken {
+            blinded_token: blinded,
+            email_id: email_id,
+            field: 0,
+            position: pos,
+            indexed_at: ts,
+        })
+        token_count = token_count + 1
+    }
+
+    let body_tokens = tokenize(body)
+    for (pos, token) in enumerate(body_tokens) {
+        let blinded = hkdf_blind("poly-mail-search-v1", user_search_key, token)
+        eslite_insert("search_tokens", concat(mailbox_id, blinded), SearchToken {
+            blinded_token: blinded,
+            email_id: email_id,
+            field: 1,
+            position: pos,
+            indexed_at: ts,
+        })
+        token_count = token_count + 1
+    }
+
+    let from_blinded = hkdf_blind("poly-mail-search-v1", user_search_key, from_addr)
+    eslite_insert("search_tokens", concat(mailbox_id, from_blinded), SearchToken {
+        blinded_token: from_blinded,
+        email_id: email_id,
+        field: 2,
+        position: 0,
+        indexed_at: ts,
+    })
+    token_count = token_count + 1
+
+    for (pos, addr) in enumerate(to_addrs) {
+        let to_blinded = hkdf_blind("poly-mail-search-v1", user_search_key, addr)
+        eslite_insert("search_tokens", concat(mailbox_id, to_blinded), SearchToken {
+            blinded_token: to_blinded,
+            email_id: email_id,
+            field: 3,
+            position: pos,
+            indexed_at: ts,
+        })
+        token_count = token_count + 1
+    }
+
+    let index = eslite_query("search_indices", mailbox_id)
+    let new_total = if index != null { index.token_count + token_count } else { token_count }
+    eslite_insert("search_indices", mailbox_id, SearchIndex {
+        index_id: blake3(mailbox_id),
+        mailbox_id: mailbox_id,
+        token_count: new_total,
+        last_indexed_at: ts,
+        index_version: if index != null { index.index_version } else { 1 },
+    })
+
+    token_count
+}
+
+// --- Search the local index ---
+circuit search_mailbox(
+    mailbox_id: bytes(16),
+    query_text: bytes,
+    user_search_key: bytes(32),
+    max_results: u32,
+    date_from: u64,
+    date_to: u64,
+) -> SearchResultSet
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/search
+    precision C
+    observe metrics: [searches_executed, search_latency_ms, results_returned, zero_result_queries]
+    monitor "search_latency" { search_latency_ms < 200 }
+    invariant "local_only" { is_local_execution() }
+    invariant "key_present" { user_search_key != zero_bytes(32) }
+    property safety "no_query_exfiltration" { no_network_io_during(search) }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [eslite_query, eslite_scan, now]
+{
+    let start = now()
+    let query_tokens = tokenize(query_text)
+    let blinded_queries = for token in query_tokens {
+        hkdf_blind("poly-mail-search-v1", user_search_key, token)
+    }
+
+    let mut result_map = map<bytes(16), SearchResult>()
+
+    for blinded in blinded_queries {
+        let matches = eslite_scan("search_tokens", concat(mailbox_id, blinded))
+        for m in matches {
+            if date_from > 0 and m.indexed_at < date_from { continue }
+            if date_to > 0 and m.indexed_at > date_to { continue }
+
+            let existing = result_map.get(m.email_id)
+            if existing != null {
+                result_map.set(m.email_id, SearchResult {
+                    email_id: m.email_id,
+                    relevance_score: existing.relevance_score + field_weight(m.field),
+                    matched_fields: dedup(append(existing.matched_fields, m.field)),
+                    snippet_hash: existing.snippet_hash,
+                })
+            } else {
+                result_map.set(m.email_id, SearchResult {
+                    email_id: m.email_id,
+                    relevance_score: field_weight(m.field),
+                    matched_fields: [m.field],
+                    snippet_hash: blake3(concat(m.email_id, blinded)),
+                })
+            }
+        }
+    }
+
+    let sorted = sort_by_desc(result_map.values(), |r| r.relevance_score)
+    let truncated = take(sorted, max_results)
+    let end = now()
+
+    let index = eslite_query("search_indices", mailbox_id)
+    SearchResultSet {
+        results: truncated,
+        total_matches: len(result_map),
+        query_time_ms: (end - start),
+        index_version: if index != null { index.index_version } else { 0 },
+    }
+}
+
+// --- Remove an email from the search index ---
+circuit deindex_email(
+    mailbox_id: bytes(16),
+    email_id: bytes(16),
+) -> bool
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/search
+    precision C
+    observe metrics: [emails_deindexed, tokens_removed]
+    meters [compute_cycles]
+    wasm_abi [eslite_delete, eslite_scan]
+{
+    let tokens = eslite_scan("search_tokens", mailbox_id)
+    let mut removed = 0
+    for t in tokens {
+        if t.email_id == email_id {
+            eslite_delete("search_tokens", concat(mailbox_id, t.blinded_token))
+            removed = removed + 1
+        }
+    }
+    removed > 0
+}
+
+// --- Rebuild the entire search index for a mailbox ---
+circuit rebuild_index(
+    mailbox_id: bytes(16),
+    user_search_key: bytes(32),
+) -> SearchIndex
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/search
+    precision C
+    observe metrics: [index_rebuilds, rebuild_latency_ms]
+    monitor "rebuild_latency" { rebuild_latency_ms < 30000 }
+    invariant "local_only" { is_local_execution() }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [eslite_delete, eslite_scan, eslite_insert, now]
+{
+    let ts = now()
+    eslite_delete("search_tokens", mailbox_id)
+    eslite_delete("search_indices", mailbox_id)
+    let index = SearchIndex {
+        index_id: blake3(mailbox_id),
+        mailbox_id: mailbox_id,
+        token_count: 0,
+        last_indexed_at: ts,
+        index_version: 1,
+    }
+    eslite_insert("search_indices", mailbox_id, index)
+    index
+}
+
+// ── Monitors ─────────────────────────────────────────────────────
+
+monitor "search_throughput" {
+    assert metric("searches_executed_per_sec") > 0
+    window 60s
+    severity warning
+}
+
+// ── Golden Tests ─────────────────────────────────────────────────
+
+test golden "index_and_search_roundtrip" {
+    input {
+        mailbox_id: bytes(16, 0xAA)
+        email_id: bytes(16, 0xBB)
+        subject: bytes("Meeting tomorrow at 3pm")
+        body: bytes("Hi team, let's meet tomorrow at 3pm in the conference room.")
+        from_addr: bytes("alice@polylabs.dev")
+        to_addrs: [bytes("bob@polylabs.dev")]
+        user_search_key: bytes(32, 0xCC)
+    }
+    assert {
+        let count = index_email(mailbox_id, email_id, subject, body, from_addr, to_addrs, user_search_key)
+        count > 0
+        let results = search_mailbox(mailbox_id, bytes("meeting"), user_search_key, 10, 0, 0)
+        results.total_matches >= 1
+        results.results[0].email_id == email_id
+    }
+}
+
+test golden "search_no_results" {
+    input {
+        mailbox_id: bytes(16, 0xDD)
+        query_text: bytes("nonexistent query term")
+        user_search_key: bytes(32, 0xEE)
+    }
+    assert {
+        let results = search_mailbox(mailbox_id, query_text, user_search_key, 10, 0, 0)
+        results.total_matches == 0
+    }
+}
+
+fuzz_target "search_index_fuzz" {
+    inputs {
+        mailbox_id: bytes(16)
+        email_id: bytes(16)
+        subject: bytes(1..998)
+        body: bytes(1..65536)
+        user_search_key: bytes(32)
+    }
+    assert {
+        no_panic
+    }
+}

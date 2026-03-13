@@ -1,4 +1,4 @@
-// Poly Mail Classify — ESLM spam/phishing classification on-device
+// Poly Mail Classify — ESLM spam/phishing classification on-device (v0.11.0)
 //
 // All classification runs client-side in WASM. Email content never
 // leaves the device for spam analysis. The ESLM model is a
@@ -33,20 +33,33 @@ type PhishingIndicator = struct {
     matched_pattern: bytes(256),
 }
 
-type ClassificationResult = struct {
+data ClassificationResult : mail v1 {
     email_id: bytes(16),
     spam_score: SpamScore,
     phishing_indicators: [PhishingIndicator],
     model_version: bytes(8),
     inference_time_ms: u32,
 }
+    store kv
+    govern lex esn/global/org/polylabs/mail/classify
+    cortex {
+        obfuscate [email_id]
+        infer on_write
+        on_anomaly alert "mail-security"
+    }
 
-type LocalModelWeights = struct {
+data LocalModelWeights : mail v1 {
     model_id: bytes(16),
     version: u64,
     weights_hash: bytes(32),
     last_updated_ms: u64,
 }
+    store kv
+    govern lex esn/global/org/polylabs/mail/classify
+    cortex {
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
 
 // --- Classify an email (combined spam + phishing analysis) ---
 circuit classify_email(
@@ -59,9 +72,11 @@ circuit classify_email(
 ) -> ClassificationResult
     profile poly_framework_sensitive
     lex esn/global/org/polylabs/mail/classify
+    precision C
     observe metrics: [classifications, classification_latency_ms, spam_detected, phishing_detected]
     monitor "classification_latency" { classification_latency_ms < 300 }
     invariant "local_only" { model.weights_hash != bytes(32) }
+    property safety "no_content_exfiltration" { no_network_io_during(eslm_infer) }
     meters [compute_cycles, memory_bytes]
     wasm_abi [eslm_infer, now]
 {
@@ -89,6 +104,7 @@ circuit detect_spam(
 ) -> SpamScore
     profile poly_framework_sensitive
     lex esn/global/org/polylabs/mail/classify
+    precision C
     observe metrics: [spam_scores_computed, spam_positives, spam_negatives]
     wasm_abi [eslm_infer]
 {
@@ -120,6 +136,7 @@ circuit detect_phishing(
 ) -> [PhishingIndicator]
     profile poly_framework_sensitive
     lex esn/global/org/polylabs/mail/classify
+    precision C
     observe metrics: [phishing_scans, phishing_positives, indicator_counts]
     wasm_abi [eslm_infer, pattern_match]
 {
@@ -166,8 +183,10 @@ circuit train_local_model(
 ) -> LocalModelWeights
     profile poly_framework_sensitive
     lex esn/global/org/polylabs/mail/classify
+    precision C
     observe metrics: [local_training_ops, model_updates, dp_noise_applied]
     invariant "dp_noise_positive" { dp_noise_scale > 0.0 }
+    property safety "dp_noise_always_applied" { dp_noise_scale > 0.0 }
     meters [compute_cycles, memory_bytes]
     wasm_abi [eslm_train, random_bytes, now]
 {
@@ -193,6 +212,7 @@ circuit report_false_positive(
 ) -> LocalModelWeights
     profile poly_framework_standard
     lex esn/global/org/polylabs/mail/classify
+    precision C
     observe metrics: [false_positives_reported, model_corrections]
     invariant "different_labels" { original_classification != corrected_classification }
     wasm_abi [eslite_query]

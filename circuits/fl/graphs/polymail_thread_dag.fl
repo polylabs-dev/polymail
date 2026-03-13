@@ -1,4 +1,4 @@
-/// Poly Mail Thread DAG — dag email_thread
+/// Poly Mail Thread DAG — dag email_thread (v0.11.0)
 /// Stratum DAG storage + Cortex AI governance
 /// govern lex esn/global/org/polylabs/mail
 ///
@@ -33,7 +33,7 @@ type SpamVerdict = enum {
 
 // ── Data: Node type (Stratum store dag + Cortex) ────────────────
 
-data EmailNode : app v1 {
+data EmailNode : mail v1 {
     email_id: bytes(16),
     thread_id: bytes(16),
     sender_id: bytes(16),
@@ -86,7 +86,7 @@ state_machine email_lifecycle {
     initial DRAFT
     persistence wal
     terminal [SPAM, ARCHIVED, DELETED, PURGED]
-    li_anomaly_detection true
+    ai_anomaly_detection true
 
     DRAFT -> QUEUED when user_send
     QUEUED -> SENDING when relay_picked_up
@@ -239,6 +239,8 @@ circuit send_email(
     observe metrics: [emails_sent, send_latency_ms, multi_recipient_sends, encrypted_size_bytes]
     monitor "send_latency" { send_latency_ms < 500 }
     invariant "draft_exists" { dag_lookup(email_thread, email_id) != null }
+    property safety "email_always_encrypted" { encrypted.content_hash != zero_bytes(32) }
+    property liveness "send_completes" { eventually(sm_state(email_lifecycle, email_id) == "SENT") }
     meters [compute_cycles, bandwidth, memory_bytes]
     test golden "send_single_recipient" {
         let draft = compose_draft(
@@ -250,7 +252,6 @@ circuit send_email(
             bytes(16),
             bytes(16),
         )
-        // Encryption tested via polymail_encrypt integration tests
     }
 {
     sm_transition(email_lifecycle, email_id, "QUEUED")
@@ -289,6 +290,7 @@ circuit receive_email(
     constant_time true
     observe metrics: [emails_received, receive_latency_ms, thread_extensions, spam_auto_classified]
     monitor "receive_latency" { receive_latency_ms < 300 }
+    property safety "signature_verified" { sig_valid == true }
     meters [compute_cycles, storage, bandwidth]
     wasm_abi [now]
 {

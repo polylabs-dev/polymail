@@ -1,4 +1,4 @@
-// Poly Mail Metering — Email operation metering
+// Poly Mail Metering — Email operation metering (v0.11.0)
 //
 // Maps each Poly Mail operation to PolyKit metering dimensions:
 //   send    [Bandwidth, Observables, Executions]
@@ -10,13 +10,19 @@
 
 import polykit_metering
 
-type MailTier = struct {
+data MailTier : mail v1 {
     tier_name: string,
     max_storage_bytes: u64,
     max_send_per_day: u64,
     max_attachment_bytes: u64,
     custom_domains: u8,
 }
+    store kv
+    govern lex esn/global/org/polylabs/mail/metering
+    cortex {
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
 
 type StorageQuota = struct {
     used_bytes: u64,
@@ -25,7 +31,7 @@ type StorageQuota = struct {
     over_quota: bool,
 }
 
-type MailUsageSummary = struct {
+data MailUsageSummary : mail v1 {
     user_id: bytes(16),
     sends_today: u64,
     receives_today: u64,
@@ -34,11 +40,19 @@ type MailUsageSummary = struct {
     searches_today: u64,
     period_start_ms: u64,
 }
+    store kv
+    govern lex esn/global/org/polylabs/mail/metering
+    cortex {
+        obfuscate [user_id]
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
 
 // --- Meter an email send operation ---
 circuit meter_send(user_id: bytes(16), body_size: u64, recipient_count: u8) -> MeteringRecord
     profile poly_framework_standard
     lex esn/global/org/polylabs/mail/metering
+    precision C
     observe metrics: [sends_metered, send_bandwidth_bytes]
     meters [compute_cycles]
     wasm_abi [now]
@@ -60,6 +74,7 @@ circuit meter_send(user_id: bytes(16), body_size: u64, recipient_count: u8) -> M
 circuit meter_receive(user_id: bytes(16), body_size: u64, stored: bool) -> MeteringRecord
     profile poly_framework_standard
     lex esn/global/org/polylabs/mail/metering
+    precision C
     observe metrics: [receives_metered, receive_bandwidth_bytes]
     meters [compute_cycles]
 {
@@ -81,6 +96,7 @@ circuit meter_receive(user_id: bytes(16), body_size: u64, stored: bool) -> Meter
 circuit meter_attachment(user_id: bytes(16), attachment_size: u64, is_upload: bool) -> MeteringRecord
     profile poly_framework_standard
     lex esn/global/org/polylabs/mail/metering
+    precision C
     observe metrics: [attachments_metered, attachment_bytes_metered]
     meters [compute_cycles]
 {
@@ -102,6 +118,7 @@ circuit meter_attachment(user_id: bytes(16), attachment_size: u64, is_upload: bo
 circuit check_storage_quota(user_id: bytes(16), tier: MailTier) -> StorageQuota
     profile poly_framework_standard
     lex esn/global/org/polylabs/mail/metering
+    precision C
     observe metrics: [quota_checks, quota_exceeded]
     monitor "quota_warning" { percent_used < 90.0 }
     wasm_abi [eslite_query]
@@ -120,6 +137,7 @@ circuit check_storage_quota(user_id: bytes(16), tier: MailTier) -> StorageQuota
 circuit get_usage(user_id: bytes(16)) -> MailUsageSummary
     profile poly_framework_standard
     lex esn/global/org/polylabs/mail/metering
+    precision C
     observe metrics: [usage_queries]
     wasm_abi [eslite_query, now]
 {

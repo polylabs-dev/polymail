@@ -1,4 +1,4 @@
-// Poly Mail SMTP Bridge — SMTP/IMAP interop for classical email clients
+// Poly Mail SMTP Bridge — SMTP/IMAP interop for classical email clients (v0.11.0)
 //
 // Local bridge: localhost IMAP (1143) / SMTP (1025) for Thunderbird, Outlook, etc.
 // Server-side gateway: MX records → Poly Mail ingest with PQ re-encryption.
@@ -10,7 +10,7 @@
 import polykit_identity
 import polykit_metering
 
-type SmtpSession = struct {
+data SmtpSession : mail v1 {
     session_id: bytes(16),
     client_addr: bytes(16),
     authenticated: bool,
@@ -19,6 +19,13 @@ type SmtpSession = struct {
     rcpt_to: [bytes(254)],
     state: SmtpState,
 }
+    store kv
+    govern lex esn/global/org/polylabs/mail/bridge
+    cortex {
+        obfuscate [client_addr]
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
 
 type SmtpState = enum {
     Connected,
@@ -30,7 +37,7 @@ type SmtpState = enum {
     Failed,
 }
 
-type ImapFolder = struct {
+data ImapFolder : mail v1 {
     folder_id: bytes(16),
     name: bytes(128),
     uidvalidity: u32,
@@ -38,8 +45,14 @@ type ImapFolder = struct {
     message_count: u32,
     unseen_count: u32,
 }
+    store kv
+    govern lex esn/global/org/polylabs/mail/bridge
+    cortex {
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
 
-type DkimSignature = struct {
+data DkimSignature : mail v1 {
     algorithm: bytes(16),
     domain: bytes(253),
     selector: bytes(63),
@@ -48,6 +61,12 @@ type DkimSignature = struct {
     body_hash: bytes(32),
     timestamp: u64,
 }
+    store kv
+    govern lex esn/global/org/polylabs/mail/bridge
+    cortex {
+        infer on_write
+        on_anomaly alert "mail-security"
+    }
 
 type MimeMessage = struct {
     message_id: bytes(128),
@@ -84,9 +103,11 @@ circuit smtp_receive(
 ) -> PolymailMessage
     profile poly_framework_sensitive
     lex esn/global/org/polylabs/mail/bridge
+    precision C
     observe metrics: [smtp_inbound, mime_conversions, dkim_verifications, spf_checks]
     monitor "smtp_receive_latency" { receive_latency_ms < 1000 }
     invariant "session_authenticated" { session.authenticated == true }
+    property safety "dkim_must_pass" { dkim_valid == true }
     meters [compute_cycles, bandwidth]
     wasm_abi [now]
 {
@@ -108,6 +129,7 @@ circuit smtp_send(
 ) -> SmtpSession
     profile poly_framework_sensitive
     lex esn/global/org/polylabs/mail/bridge
+    precision C
     observe metrics: [smtp_outbound, dkim_signatures_created, delivery_attempts]
     monitor "smtp_send_latency" { send_latency_ms < 5000 }
     meters [compute_cycles, bandwidth]
@@ -138,6 +160,7 @@ circuit imap_sync(
 ) -> ImapFolder
     profile poly_framework_standard
     lex esn/global/org/polylabs/mail/bridge
+    precision C
     observe metrics: [imap_syncs, messages_synced, folder_updates]
     wasm_abi [eslite_query]
 {
@@ -162,6 +185,7 @@ circuit dkim_sign(
 ) -> DkimSignature
     profile poly_framework_sensitive
     lex esn/global/org/polylabs/mail/bridge
+    precision C
     constant_time true
     observe metrics: [dkim_sign_ops, pq_dkim_signatures]
 {
@@ -186,6 +210,7 @@ circuit dkim_sign(
 circuit dkim_verify(raw_email: bytes) -> bool
     profile poly_framework_standard
     lex esn/global/org/polylabs/mail/bridge
+    precision C
     observe metrics: [dkim_verify_ops, dkim_pass, dkim_fail]
 {
     let dkim_header = extract_dkim_header(raw_email)
@@ -204,6 +229,7 @@ circuit dkim_verify(raw_email: bytes) -> bool
 circuit mime_to_polymail(mime: MimeMessage) -> PolymailMessage
     profile poly_framework_standard
     lex esn/global/org/polylabs/mail/bridge
+    precision C
     observe metrics: [mime_to_poly_conversions]
 {
     let email_id = blake3(concat(mime.message_id, mime.date))
@@ -226,6 +252,7 @@ circuit mime_to_polymail(mime: MimeMessage) -> PolymailMessage
 circuit polymail_to_mime(msg: PolymailMessage) -> MimeMessage
     profile poly_framework_standard
     lex esn/global/org/polylabs/mail/bridge
+    precision C
     observe metrics: [poly_to_mime_conversions]
 {
     let message_id = blake3(concat(msg.email_id, msg.timestamp))

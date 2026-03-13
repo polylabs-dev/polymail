@@ -1,4 +1,4 @@
-/// Poly Mail Platform Health — Blind relay pattern health monitoring
+/// Poly Mail Platform Health — Blind relay pattern health monitoring (v0.11.0)
 ///
 /// Aggregates mailbox-operation metrics through blinded, cohort-enforced telemetry.
 /// Stratum: kv store + lex governance under esn/global/org/polylabs/mail.
@@ -14,7 +14,7 @@ import polykit_metering from "../../polykit/circuits/fl/polykit_metering.fl"
 
 // ── Data Declarations with Stratum + Cortex ─────────────────────────
 
-data PlatformMetrics : app v1 {
+data PlatformMetrics : mail v1 {
     blinded_user_id: bytes(32),
     cohort_ok: bool,
     cohort_size: u32,
