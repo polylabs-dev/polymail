@@ -91,7 +91,7 @@ Combine products for enterprise discount:
 
 | Feature | How |
 |---------|-----|
-| Retention policies | ESCIR FSM enforces per-classification retention |
+| Retention policies | FLIR FSM enforces per-classification retention |
 | Legal hold | Prevents deletion/expiry for specified users/timeframes |
 | eDiscovery | MPC-based: prove existence/content without revealing other data |
 | Audit logs | All admin actions logged, PQ-signed, scatter-stored |
