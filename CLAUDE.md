@@ -1,12 +1,14 @@
 # Poly Mail
 
 **GitHub**: [polylabs-dev/polymail](https://github.com/polylabs-dev/polymail)
-**Platform**: eStream v0.11.0
+**Platform**: eStream v0.22.0
 **Depends on**: PolyKit v0.3.0, eStream graph/DAG constructs
+
+100% FastLang. No hand-written Rust.
 
 ## Purpose
 
-Post-quantum encrypted email with scatter storage, SMTP/IMAP bridge, and ESLM spam/phishing detection. All crypto in Rust/WASM, TypeScript is DOM-only.
+Post-quantum encrypted email with scatter storage, SMTP/IMAP bridge, and ESLM spam/phishing detection. All crypto compiled from FastLang via FLIR codegen.
 
 ## Zero-Linkage Privacy
 
@@ -16,10 +18,10 @@ HKDF context: `poly-mail-v1`. User identities are completely isolated from all o
 
 - `circuits/fl/` — FastLang circuit definitions (encryption, routing, classification, metering, SMTP bridge, RBAC, search, filter, calendar)
 - `circuits/fl/graphs/` — Graph/DAG constructs (mailbox_registry, email_thread)
-- `crates/` — Rust backend crates (poly-mail-core, poly-smtp-bridge, poly-sdk-backend)
-- `packages/` — TypeScript SDKs and console widgets
 - `apps/` — Desktop (Tauri) and mobile (React Native) clients
 - `docs/` — Architecture and design documents
+
+> **Note**: `crates/` and `packages/` are legacy scaffolding superseded by FLIR codegen. All logic lives in FastLang circuits.
 
 ## Circuits (12 total)
 
@@ -44,7 +46,7 @@ HKDF context: `poly-mail-v1`. User identities are completely isolated from all o
 - `dag email_thread` — conversation threading with `enforce acyclic`, `state_machine email_lifecycle`
 - `graph mail_roles` — RBAC for mailbox operations (Owner > Admin > Member > ReadOnly)
 
-## v0.11.0 Conventions
+## v0.22.0 Conventions
 
 - All stored types use `data X : mail v1 { ... }` with `store kv|graph|dag`, `govern lex`, and `cortex { ... }`
 - FSMs use `persistence wal`, `terminal [...]`, `ai_anomaly_detection true`
@@ -54,12 +56,3 @@ HKDF context: `poly-mail-v1`. User identities are completely isolated from all o
 ## Commit Convention
 
 Commit to the GitHub issue or epic the work was done under.
-
-## Cross-Repo Coordination
-
-This repo is part of the [polylabs-dev](https://github.com/polylabs-dev) organization, coordinated through the **AI Toolkit hub** at `toddrooke/ai-toolkit/`.
-
-For cross-repo context, strategic priorities, and the master work queue:
-- `toddrooke/ai-toolkit/CLAUDE-CONTEXT.md` — org map and priorities
-- `toddrooke/ai-toolkit/scratch/BACKLOG.md` — master backlog
-- `toddrooke/ai-toolkit/repos/polylabs-dev.md` — this org's status summary

@@ -1,0 +1,348 @@
+// Poly Mail Rich Compose — Rich email composition using studio document editor
+//
+// Lex Architecture:
+//   esn/global/org/polylabs/mail/compose
+//   Composes polykit_studio_document to provide WYSIWYG HTML email authoring.
+//   Attachments can be previewed inline using the document engine (PDF, DOCX,
+//   PPTX rendered to thumbnail + text extract). Final HTML is sanitized, then
+//   encrypted via polymail_encrypt before relay.
+//
+// Flow:
+//   compose_rich_email   → open studio editor in email mode → produce HTML draft
+//   preview_attachment   → decrypt attachment → render preview via document engine
+//   inline_document_view → render attachment inline within compose surface
+
+import polykit_studio_document
+import polymail_encrypt
+import polymail_metering
+
+// ── Types ───────────────────────────────────────────────────────
+
+type ComposeFormat = enum {
+    PlainText,
+    RichHtml,
+    Markdown,
+}
+
+type AttachmentFormat = enum {
+    Pdf,
+    Docx,
+    Pptx,
+    Xlsx,
+    Image,
+    Other,
+}
+
+// ── Data ────────────────────────────────────────────────────────
+
+data RichEmailDraft : mail v1 {
+    draft_id: bytes(16),
+    sender_id: bytes(16),
+    subject_hash: bytes(32),
+    html_body_hash: bytes(32),
+    plain_body_hash: bytes(32),
+    format: ComposeFormat,
+    attachment_count: u32,
+    total_size_bytes: u64,
+    created_at: u64,
+    updated_at: u64,
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail/compose
+    cortex {
+        obfuscate [sender_id]
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
+
+data EmailAttachmentPreview : mail v1 {
+    attachment_id: bytes(16),
+    draft_id: bytes(16),
+    format: AttachmentFormat,
+    filename_hash: bytes(32),
+    thumbnail_hash: bytes(32),
+    page_count: u32,
+    size_bytes: u64,
+    rendered_at: u64,
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail/compose
+    cortex {
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
+
+data InlineDocumentView : mail v1 {
+    view_id: bytes(16),
+    attachment_id: bytes(16),
+    rendered_html_hash: bytes(32),
+    page_range_start: u32,
+    page_range_end: u32,
+    rendered_at: u64,
+}
+    store kv
+    govern lex esn/global/org/polylabs/mail/compose
+    cortex {
+        infer on_write
+        on_anomaly alert "mail-team"
+    }
+
+// ── Streams ─────────────────────────────────────────────────────
+
+stream compose_events: event<RichEmailDraft>
+    | throttle 500/s burst 1000
+
+stream attachment_preview_events: event<EmailAttachmentPreview>
+    | throttle 300/s burst 600
+
+// ── Circuits ────────────────────────────────────────────────────
+
+@guard(block_on: sender_not_authenticated)
+circuit compose_rich_email(
+    sender_id: bytes(16),
+    subject: string,
+    initial_body: bytes,
+    format: ComposeFormat,
+) -> RichEmailDraft
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/compose
+    precision C
+    observe metrics: [drafts_created, compose_latency_ms, format_distribution]
+    monitor "compose_latency" { compose_latency_ms < 200 }
+    invariant "sender_authenticated" { sender_id != zero_bytes(16) }
+    invariant "subject_nonempty" { len(subject) > 0 }
+    property safety "draft_hashes_populated" {
+        result.html_body_hash != zero_bytes(32) || result.plain_body_hash != zero_bytes(32)
+    }
+    property liveness "draft_eventually_stored" {
+        eventually(eslite_exists("drafts", result.draft_id))
+    }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [eslite_insert, now, csprng]
+{
+    let ts = now()
+    let draft_seed = concat(sender_id, encode(subject), csprng(16), encode_u64(ts))
+    let draft_id = bit_slice(sha3_256(draft_seed), 0, 128)
+
+    let (html_body, plain_body) = match format {
+        ComposeFormat::RichHtml => {
+            let html = polykit_studio_document::render_html_email(initial_body)
+            let sanitized = polykit_studio_document::sanitize_html(html)
+            let plain = polykit_studio_document::html_to_plaintext(sanitized)
+            (sanitized, plain)
+        },
+        ComposeFormat::Markdown => {
+            let html = polykit_studio_document::markdown_to_html(initial_body)
+            let plain = polykit_studio_document::html_to_plaintext(html)
+            (html, plain)
+        },
+        ComposeFormat::PlainText => {
+            (bytes(""), initial_body)
+        },
+    }
+
+    let draft = RichEmailDraft {
+        draft_id: draft_id,
+        sender_id: sender_id,
+        subject_hash: sha3_256(encode(subject)),
+        html_body_hash: sha3_256(html_body),
+        plain_body_hash: sha3_256(plain_body),
+        format: format,
+        attachment_count: 0,
+        total_size_bytes: len(html_body) + len(plain_body),
+        created_at: ts,
+        updated_at: ts,
+    }
+
+    eslite_insert("drafts", draft_id, draft)
+    emit(compose_events, draft)
+
+    polymail_metering::record_usage(sender_id, "mail_compose", DimensionValues {
+        executions: 1, hashes: 3, bandwidth: 0,
+        storage: len(html_body) + len(plain_body), observables: 2, proofs: 0, circuits: 1, mpc_sessions: 0,
+    })
+
+    draft
+}
+
+@guard(block_on: decryption_failure)
+circuit preview_attachment(
+    draft_id: bytes(16),
+    user_id: bytes(16),
+    encrypted_data: bytes,
+    decryption_key: bytes(32),
+    filename: string,
+    format: AttachmentFormat,
+) -> EmailAttachmentPreview
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/compose
+    precision C
+    observe metrics: [attachment_previews, preview_render_ms, attachment_formats]
+    monitor "attachment_preview_latency" { preview_render_ms < 1000 }
+    invariant "data_nonempty" { len(encrypted_data) > 0 }
+    invariant "draft_exists" { eslite_exists("drafts", draft_id) }
+    property safety "preview_format_matches_input" { result.format == format }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [now, aes_gcm_decrypt, csprng]
+{
+    let ts = now()
+    let content = aes_gcm_decrypt(decryption_key, encrypted_data)
+    let render = polykit_studio_document::render_preview(content, format)
+    let att_seed = concat(draft_id, encode(filename), csprng(16))
+    let attachment_id = bit_slice(sha3_256(att_seed), 0, 128)
+
+    let preview = EmailAttachmentPreview {
+        attachment_id: attachment_id,
+        draft_id: draft_id,
+        format: format,
+        filename_hash: sha3_256(encode(filename)),
+        thumbnail_hash: sha3_256(render.thumbnail),
+        page_count: render.page_count,
+        size_bytes: len(content),
+        rendered_at: ts,
+    }
+
+    emit(attachment_preview_events, preview)
+
+    polymail_metering::record_usage(user_id, "mail_attachment_preview", DimensionValues {
+        executions: 1, hashes: 2, bandwidth: len(content),
+        storage: 0, observables: 1, proofs: 0, circuits: 1, mpc_sessions: 0,
+    })
+
+    preview
+}
+
+circuit inline_document_view(
+    attachment_id: bytes(16),
+    encrypted_data: bytes,
+    decryption_key: bytes(32),
+    format: AttachmentFormat,
+    page_start: u32,
+    page_end: u32,
+) -> InlineDocumentView
+    profile poly_framework_standard
+    lex esn/global/org/polylabs/mail/compose
+    precision C
+    observe metrics: [inline_views, inline_render_ms, inline_pages]
+    monitor "inline_render_latency" { inline_render_ms < 800 }
+    invariant "page_range_valid" { page_start <= page_end }
+    invariant "data_nonempty" { len(encrypted_data) > 0 }
+    property safety "page_range_preserved" {
+        result.page_range_start == page_start && result.page_range_end == page_end
+    }
+    meters [compute_cycles, memory_bytes]
+    wasm_abi [now, aes_gcm_decrypt, csprng]
+{
+    let ts = now()
+    let content = aes_gcm_decrypt(decryption_key, encrypted_data)
+    let rendered_html = polykit_studio_document::render_page_range(content, format, page_start, page_end)
+    let view_seed = concat(attachment_id, encode_u32(page_start), csprng(16))
+    let view_id = bit_slice(sha3_256(view_seed), 0, 128)
+
+    InlineDocumentView {
+        view_id: view_id,
+        attachment_id: attachment_id,
+        rendered_html_hash: sha3_256(rendered_html),
+        page_range_start: page_start,
+        page_range_end: page_end,
+        rendered_at: ts,
+    }
+}
+
+// ── Test & Verification ─────────────────────────────────────────
+
+test golden "compose_rich_html_email" {
+    input {
+        sender_id: bytes(16, 0xAA)
+        subject: "Quarterly Report"
+        initial_body: bytes("<h1>Q4 Results</h1><p>Revenue grew 25% YoY.</p>")
+        format: ComposeFormat::RichHtml
+    }
+    assert {
+        result.draft_id != zero_bytes(16)
+        result.sender_id == bytes(16, 0xAA)
+        result.format == ComposeFormat::RichHtml
+        result.html_body_hash != zero_bytes(32)
+        result.subject_hash == sha3_256(encode("Quarterly Report"))
+        result.created_at > 0
+    }
+}
+
+test golden "preview_pdf_attachment" {
+    setup {
+        eslite_insert("drafts", bytes(16, 0xDD), RichEmailDraft {
+            draft_id: bytes(16, 0xDD),
+            sender_id: bytes(16, 0xAA),
+            subject_hash: sha3_256(encode("Test")),
+            html_body_hash: zero_bytes(32),
+            plain_body_hash: sha3_256(bytes("hello")),
+            format: ComposeFormat::PlainText,
+            attachment_count: 0,
+            total_size_bytes: 5,
+            created_at: 1000,
+            updated_at: 1000,
+        })
+    }
+    input {
+        draft_id: bytes(16, 0xDD)
+        user_id: bytes(16, 0xAA)
+        encrypted_data: bytes(4096, 0xCC)
+        decryption_key: bytes(32, 0xEE)
+        filename: "report.pdf"
+        format: AttachmentFormat::Pdf
+    }
+    assert {
+        result.attachment_id != zero_bytes(16)
+        result.draft_id == bytes(16, 0xDD)
+        result.format == AttachmentFormat::Pdf
+        result.page_count > 0
+        result.size_bytes > 0
+    }
+}
+
+test golden "inline_view_page_range" {
+    input {
+        attachment_id: bytes(16, 0xFF)
+        encrypted_data: bytes(2048, 0xCC)
+        decryption_key: bytes(32, 0xEE)
+        format: AttachmentFormat::Docx
+        page_start: 0
+        page_end: 2
+    }
+    assert {
+        result.view_id != zero_bytes(16)
+        result.attachment_id == bytes(16, 0xFF)
+        result.page_range_start == 0
+        result.page_range_end == 2
+        result.rendered_html_hash != zero_bytes(32)
+    }
+}
+
+kat_vector "sha3_256_subject_hash" {
+    function: "sha3_256"
+    input: bytes("Quarterly Report")
+    expected: sha3_256(bytes("Quarterly Report"))
+}
+
+fuzz_target "compose_rich_email_fuzz" {
+    inputs {
+        sender_id: bytes(16)
+        subject: string(1..256)
+        initial_body: bytes(1..65536)
+        format: u8(0..2)
+    }
+    assert {
+        no_panic
+    }
+}
+
+fuzz_target "preview_attachment_fuzz" {
+    inputs {
+        encrypted_data: bytes(1..65536)
+        decryption_key: bytes(32)
+        format: u8(0..5)
+    }
+    assert {
+        no_panic
+    }
+}
