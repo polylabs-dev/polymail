@@ -1,0 +1,542 @@
+/// Spec: specs/POLYMAIL_CE_APP_GRAPH_SPEC.md
+/// App Graph for PolyMail — 13 ModuleNode definitions composing the PQ-encrypted
+/// email platform into Compose, Transport, Intelligence, Platform, and Graph
+/// partitions. Registers intra-graph REQUIRES edges and cross-graph BRIDGE_TO
+/// edges to PolyKit and PolyCalendar.
+///
+/// Epic: polymail#TBD (CE + App Graph Integration)
+/// govern lex polylabs/polymail
+
+lex polylabs/polymail
+
+@target software
+@codegen_targets ["wasm", "rust"]
+
+import "core/deployment/module_stratum.fl" {
+    ModuleNode, ModuleEdge, InterAppEdge, CsrStorage,
+    CompilationReceipt, ResourceBudget8D, SemVer,
+    ModuleType, AperturePartition, ModuleState, RolloutState,
+    PersistencePolicy, OfflineCachePolicy, SLATier, EntitlementTier,
+    EnforcementMode, BridgeScope,
+    module_graph_add_module, module_graph_add_edge,
+    module_graph_add_bridge_edge,
+    EDGE_REQUIRES, EDGE_BRIDGE_TO,
+}
+
+import "core/deployment/cross_graph_edges.fl" {
+    EDGE_GOVERNANCE_OBSERVE,
+    GovernanceObserveEdge,
+    module_graph_add_governance_observe_edge,
+}
+
+import "polykit/circuits/fl/polykit_app_graph.fl" {
+    ProductGraphConfig, find_poly_module_id,
+}
+
+// ── Constants ──────────────────────────────────────────────────────────────────
+
+const POLYMAIL_VERSION_MAJOR: u32 = 0
+const POLYMAIL_VERSION_MINOR: u32 = 1
+const POLYMAIL_VERSION_PATCH: u32 = 0
+const POLYMAIL_APP_LEX: string = "polylabs/polymail"
+const POLYMAIL_VERSION_STR: string = "0.1.0"
+const POLYMAIL_MODULE_COUNT: u64 = 13
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+circuit polymail_placeholder_receipt() -> CompilationReceipt
+    lex polylabs/polymail
+    @status production
+    @precision D
+{
+    CompilationReceipt {
+        source_hash: bytes(32, 0x00),
+        compiler_version: SemVer {
+            major: POLYMAIL_VERSION_MAJOR,
+            minor: POLYMAIL_VERSION_MINOR,
+            patch: POLYMAIL_VERSION_PATCH,
+            pre_release: "",
+        },
+        output_hash: bytes(32, 0x00),
+        prime_device_id: None,
+        compilation_timestamp: 0,
+        reproducible_verified: false,
+        receipt_signature: bytes(4627, 0x00),
+    }
+}
+
+circuit make_polymail_module(
+    name: string,
+    partition: u8,
+    sla: u8,
+    budget: ResourceBudget8D
+) -> ModuleNode
+    lex polylabs/polymail
+    @status production
+    @precision C
+    observe metrics: [module_name, aperture_partition]
+    meters [compute_cycles]
+{
+    ModuleNode {
+        name: name,
+        version_major: POLYMAIL_VERSION_MAJOR,
+        version_minor: POLYMAIL_VERSION_MINOR,
+        version_patch: POLYMAIL_VERSION_PATCH,
+        version_pre: "",
+        module_type: ModuleType::SmartCircuit as u8,
+        content_hash: bytes(32, 0x00),
+        signature_chain: bytes(0),
+        aperture_partition: partition,
+        role_set: ["User", "Admin", "Delegate"],
+        required_entitlement: EntitlementTier::Free as u8,
+        classification_domains: [],
+        max_classification_level: 0,
+        compilation_receipt: polymail_placeholder_receipt(),
+        source_hash: bytes(32, 0x00),
+        compiler_version_major: POLYMAIL_VERSION_MAJOR,
+        compiler_version_minor: POLYMAIL_VERSION_MINOR,
+        prime_device_id: bytes(0),
+        reproducible_verified: false,
+        resource_budget: budget,
+        budget_enforcement_mode: EnforcementMode::Hard as u8,
+        state: ModuleState::Active as u8,
+        rollout_state: RolloutState::Canary as u8,
+        canary_target: None,
+        persistence: PersistencePolicy::Persistent as u8,
+        offline_cache_policy: OfflineCachePolicy::CacheAndVerify as u8,
+        max_staleness_seconds: 3600,
+        sla_tier: sla,
+        preferred_locality: "",
+        created_at_ms: 0,
+        updated_at_ms: 0,
+    }
+}
+
+circuit make_polymail_requires_edge(source: string, target: string) -> ModuleEdge
+    lex polylabs/polymail
+    @status production
+    @precision D
+{
+    ModuleEdge {
+        edge_type: EDGE_REQUIRES,
+        source_module: source,
+        source_version: POLYMAIL_VERSION_STR,
+        target_module: target,
+        target_version_constraint: ">=" ++ POLYMAIL_VERSION_STR,
+        metadata: bytes(0),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Module Definitions — 13 ModuleNodes
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── polymail_rich_compose ── Rich text compose with templates ────────────────
+
+circuit polymail_rich_compose_module() -> ModuleNode
+    lex polylabs/polymail  @status production  @precision B
+    observe metrics: [module_init]  meters [compute_cycles]
+{ make_polymail_module("polymail_rich_compose", AperturePartition::Head as u8,
+    SLATier::Premium as u8, ResourceBudget8D {
+        execution: 300000, hash_ops: 4000, bandwidth: 60000, storage: 80000,
+        observe_events: 8000, proofs: 100, consensus: 30, memory: 67108864,
+    }) }
+
+// ── polymail_smtp_bridge ── SMTP/IMAP protocol bridge ───────────────────────
+
+circuit polymail_smtp_bridge_module() -> ModuleNode
+    lex polylabs/polymail  @status production  @precision B
+    observe metrics: [module_init]  meters [compute_cycles]
+{ make_polymail_module("polymail_smtp_bridge", AperturePartition::Backend as u8,
+    SLATier::Premium as u8, ResourceBudget8D {
+        execution: 500000, hash_ops: 8000, bandwidth: 200000, storage: 100000,
+        observe_events: 15000, proofs: 200, consensus: 50, memory: 134217728,
+    }) }
+
+// ── polymail_route ── Inbound/outbound routing, alias resolution ────────────
+
+circuit polymail_route_module() -> ModuleNode
+    lex polylabs/polymail  @status production  @precision B
+    observe metrics: [module_init]  meters [compute_cycles]
+{ make_polymail_module("polymail_route", AperturePartition::Backend as u8,
+    SLATier::Premium as u8, ResourceBudget8D {
+        execution: 200000, hash_ops: 3000, bandwidth: 80000, storage: 60000,
+        observe_events: 10000, proofs: 100, consensus: 40, memory: 33554432,
+    }) }
+
+// ── polymail_encrypt ── ML-KEM-1024 + ML-DSA-87 envelope encryption ─────────
+
+circuit polymail_encrypt_module() -> ModuleNode
+    lex polylabs/polymail  @status production  @precision B
+    observe metrics: [module_init]  meters [compute_cycles]
+{ make_polymail_module("polymail_encrypt", AperturePartition::Backend as u8,
+    SLATier::Premium as u8, ResourceBudget8D {
+        execution: 400000, hash_ops: 12000, bandwidth: 100000, storage: 80000,
+        observe_events: 8000, proofs: 300, consensus: 40, memory: 67108864,
+    }) }
+
+// ── polymail_classify ── Spam/phishing/ham classification ───────────────────
+
+circuit polymail_classify_module() -> ModuleNode
+    lex polylabs/polymail  @status production  @precision B
+    observe metrics: [module_init]  meters [compute_cycles]
+{ make_polymail_module("polymail_classify", AperturePartition::Backend as u8,
+    SLATier::Standard as u8, ResourceBudget8D {
+        execution: 250000, hash_ops: 5000, bandwidth: 40000, storage: 60000,
+        observe_events: 12000, proofs: 150, consensus: 30, memory: 33554432,
+    }) }
+
+// ── polymail_filter ── User filter rules, label assignment ──────────────────
+
+circuit polymail_filter_module() -> ModuleNode
+    lex polylabs/polymail  @status production  @precision B
+    observe metrics: [module_init]  meters [compute_cycles]
+{ make_polymail_module("polymail_filter", AperturePartition::Backend as u8,
+    SLATier::Standard as u8, ResourceBudget8D {
+        execution: 150000, hash_ops: 2000, bandwidth: 30000, storage: 40000,
+        observe_events: 6000, proofs: 50, consensus: 20, memory: 16777216,
+    }) }
+
+// ── polymail_search ── Full-text encrypted search ───────────────────────────
+
+circuit polymail_search_module() -> ModuleNode
+    lex polylabs/polymail  @status production  @precision B
+    observe metrics: [module_init]  meters [compute_cycles]
+{ make_polymail_module("polymail_search", AperturePartition::Backend as u8,
+    SLATier::Standard as u8, ResourceBudget8D {
+        execution: 300000, hash_ops: 6000, bandwidth: 50000, storage: 120000,
+        observe_events: 8000, proofs: 100, consensus: 20, memory: 67108864,
+    }) }
+
+// ── polymail_calendar ── Meeting invite parsing, iCal extraction ────────────
+
+circuit polymail_calendar_module() -> ModuleNode
+    lex polylabs/polymail  @status production  @precision B
+    observe metrics: [module_init]  meters [compute_cycles]
+{ make_polymail_module("polymail_calendar", AperturePartition::Backend as u8,
+    SLATier::Standard as u8, ResourceBudget8D {
+        execution: 100000, hash_ops: 1000, bandwidth: 20000, storage: 30000,
+        observe_events: 4000, proofs: 30, consensus: 10, memory: 16777216,
+    }) }
+
+// ── polymail_rbac ── Per-mailbox RBAC, delegate access ──────────────────────
+
+circuit polymail_rbac_module() -> ModuleNode
+    lex polylabs/polymail  @status production  @precision B
+    observe metrics: [module_init]  meters [compute_cycles]
+{ make_polymail_module("polymail_rbac", AperturePartition::Backend as u8,
+    SLATier::Standard as u8, ResourceBudget8D {
+        execution: 80000, hash_ops: 2000, bandwidth: 15000, storage: 20000,
+        observe_events: 3000, proofs: 50, consensus: 20, memory: 8388608,
+    }) }
+
+// ── polymail_metering ── 8D metering aggregation ────────────────────────────
+
+circuit polymail_metering_module() -> ModuleNode
+    lex polylabs/polymail  @status production  @precision B
+    observe metrics: [module_init]  meters [compute_cycles]
+{ make_polymail_module("polymail_metering", AperturePartition::Backend as u8,
+    SLATier::Standard as u8, ResourceBudget8D {
+        execution: 100000, hash_ops: 1500, bandwidth: 20000, storage: 30000,
+        observe_events: 5000, proofs: 40, consensus: 15, memory: 16777216,
+    }) }
+
+// ── polymail_platform_health ── Health probes, circuit liveness ─────────────
+
+circuit polymail_platform_health_module() -> ModuleNode
+    lex polylabs/polymail  @status production  @precision B
+    observe metrics: [module_init]  meters [compute_cycles]
+{ make_polymail_module("polymail_platform_health", AperturePartition::Backend as u8,
+    SLATier::Standard as u8, ResourceBudget8D {
+        execution: 50000, hash_ops: 500, bandwidth: 10000, storage: 10000,
+        observe_events: 2000, proofs: 20, consensus: 10, memory: 8388608,
+    }) }
+
+// ── mailbox_graph ── Mailbox/Folder/Label/Contact registry ──────────────────
+
+circuit mailbox_graph_module() -> ModuleNode
+    lex polylabs/polymail  @status production  @precision B
+    observe metrics: [module_init]  meters [compute_cycles]
+{ make_polymail_module("mailbox_graph", AperturePartition::Backend as u8,
+    SLATier::Standard as u8, ResourceBudget8D {
+        execution: 150000, hash_ops: 4000, bandwidth: 30000, storage: 100000,
+        observe_events: 6000, proofs: 80, consensus: 30, memory: 33554432,
+    }) }
+
+// ── thread_dag ── Thread/Message/Reply conversation DAG ─────────────────────
+
+circuit thread_dag_module() -> ModuleNode
+    lex polylabs/polymail  @status production  @precision B
+    observe metrics: [module_init]  meters [compute_cycles]
+{ make_polymail_module("thread_dag", AperturePartition::Backend as u8,
+    SLATier::Standard as u8, ResourceBudget8D {
+        execution: 120000, hash_ops: 3000, bandwidth: 25000, storage: 80000,
+        observe_events: 5000, proofs: 60, consensus: 25, memory: 33554432,
+    }) }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Graph Registration
+// ═══════════════════════════════════════════════════════════════════════════════
+
+circuit polymail_app_graph_register(
+    graph: CsrStorage
+) -> CsrStorage
+    lex polylabs/polymail
+    @status production
+    @precision B
+    @attested true
+    invariant "capacity" { graph.num_nodes + POLYMAIL_MODULE_COUNT as u32 <= 4096 }
+    observe metrics: [registered_module_count, registered_edge_count]
+    meters [compute_cycles, memory_bytes]
+{
+    let (g, id_rich_compose)     = module_graph_add_module(graph, polymail_rich_compose_module())
+    let (g, id_smtp_bridge)      = module_graph_add_module(g, polymail_smtp_bridge_module())
+    let (g, id_route)            = module_graph_add_module(g, polymail_route_module())
+    let (g, id_encrypt)          = module_graph_add_module(g, polymail_encrypt_module())
+    let (g, id_classify)         = module_graph_add_module(g, polymail_classify_module())
+    let (g, id_filter)           = module_graph_add_module(g, polymail_filter_module())
+    let (g, id_search)           = module_graph_add_module(g, polymail_search_module())
+    let (g, id_calendar)         = module_graph_add_module(g, polymail_calendar_module())
+    let (g, id_rbac)             = module_graph_add_module(g, polymail_rbac_module())
+    let (g, id_metering)         = module_graph_add_module(g, polymail_metering_module())
+    let (g, id_platform_health)  = module_graph_add_module(g, polymail_platform_health_module())
+    let (g, id_mailbox_graph)    = module_graph_add_module(g, mailbox_graph_module())
+    let (g, id_thread_dag)       = module_graph_add_module(g, thread_dag_module())
+
+    // ── Intra-graph REQUIRES edges ──────────────────────────────────────────
+    // polymail_rich_compose → encrypt, route, mailbox_graph
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_rich_compose", "polymail_encrypt"), id_rich_compose, id_encrypt)
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_rich_compose", "polymail_route"), id_rich_compose, id_route)
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_rich_compose", "mailbox_graph"), id_rich_compose, id_mailbox_graph)
+
+    // polymail_smtp_bridge → route, encrypt
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_smtp_bridge", "polymail_route"), id_smtp_bridge, id_route)
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_smtp_bridge", "polymail_encrypt"), id_smtp_bridge, id_encrypt)
+
+    // polymail_route → filter, classify, mailbox_graph
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_route", "polymail_filter"), id_route, id_filter)
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_route", "polymail_classify"), id_route, id_classify)
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_route", "mailbox_graph"), id_route, id_mailbox_graph)
+
+    // polymail_encrypt → rbac
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_encrypt", "polymail_rbac"), id_encrypt, id_rbac)
+
+    // polymail_classify → filter, thread_dag
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_classify", "polymail_filter"), id_classify, id_filter)
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_classify", "thread_dag"), id_classify, id_thread_dag)
+
+    // polymail_filter → mailbox_graph
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_filter", "mailbox_graph"), id_filter, id_mailbox_graph)
+
+    // polymail_search → mailbox_graph, thread_dag
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_search", "mailbox_graph"), id_search, id_mailbox_graph)
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_search", "thread_dag"), id_search, id_thread_dag)
+
+    // polymail_calendar → filter, mailbox_graph
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_calendar", "polymail_filter"), id_calendar, id_filter)
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_calendar", "mailbox_graph"), id_calendar, id_mailbox_graph)
+
+    // polymail_metering → smtp_bridge
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_metering", "polymail_smtp_bridge"), id_metering, id_smtp_bridge)
+
+    // polymail_platform_health → metering, smtp_bridge
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_platform_health", "polymail_metering"), id_platform_health, id_metering)
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_platform_health", "polymail_smtp_bridge"), id_platform_health, id_smtp_bridge)
+
+    // thread_dag → mailbox_graph
+    let g = module_graph_add_edge(g, make_polymail_requires_edge("thread_dag", "mailbox_graph"), id_thread_dag, id_mailbox_graph)
+
+    g
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Cross-Graph Bridge Edges
+// ═══════════════════════════════════════════════════════════════════════════════
+
+circuit polymail_register_bridge_edges(
+    graph: CsrStorage
+) -> CsrStorage
+    lex polylabs/polymail
+    @status production
+    @precision B
+    @attested true
+    observe metrics: [bridge_count]
+    meters [compute_cycles]
+{
+    let metering_id  = find_poly_module_id(graph, "polymail_metering")
+    let rbac_id      = find_poly_module_id(graph, "polymail_rbac")
+    let encrypt_id   = find_poly_module_id(graph, "polymail_encrypt")
+    let calendar_id  = find_poly_module_id(graph, "polymail_calendar")
+
+    let g = graph
+
+    // polymail_metering → PolyKit metering aggregation
+    if metering_id != 0xFFFFFFFF as u32 {
+        let bridge = InterAppEdge {
+            edge_type: EDGE_BRIDGE_TO,
+            source_lex: POLYMAIL_APP_LEX,
+            source_module: "polymail_metering",
+            target_lex: "polykit/metering",
+            target_module: "polykit_metering",
+            bridge_scope: BridgeScope::Platform as u8,
+            shared_fields: ["send_volume", "receive_volume", "storage_bytes", "bandwidth_bytes"],
+            redacted_fields: [],
+            bilateral_confirmed: false,
+        }
+        g = module_graph_add_bridge_edge(g, bridge, metering_id)
+    }
+
+    // polymail_rbac → PolyKit RBAC role composition
+    if rbac_id != 0xFFFFFFFF as u32 {
+        let bridge = InterAppEdge {
+            edge_type: EDGE_BRIDGE_TO,
+            source_lex: POLYMAIL_APP_LEX,
+            source_module: "polymail_rbac",
+            target_lex: "polykit/rbac",
+            target_module: "polykit_rbac",
+            bridge_scope: BridgeScope::Platform as u8,
+            shared_fields: ["role_set", "delegate_permissions", "shared_mailbox_access"],
+            redacted_fields: [],
+            bilateral_confirmed: false,
+        }
+        g = module_graph_add_bridge_edge(g, bridge, rbac_id)
+    }
+
+    // polymail_encrypt → PolyKit sanitize (content sanitization)
+    if encrypt_id != 0xFFFFFFFF as u32 {
+        let bridge = InterAppEdge {
+            edge_type: EDGE_BRIDGE_TO,
+            source_lex: POLYMAIL_APP_LEX,
+            source_module: "polymail_encrypt",
+            target_lex: "polykit/sanitize",
+            target_module: "polykit_sanitize",
+            bridge_scope: BridgeScope::Platform as u8,
+            shared_fields: ["sanitized_body", "attachment_scan_result", "link_rewrite"],
+            redacted_fields: [],
+            bilateral_confirmed: false,
+        }
+        g = module_graph_add_bridge_edge(g, bridge, encrypt_id)
+    }
+
+    // polymail_calendar → PolyCalendar scheduling bridge
+    if calendar_id != 0xFFFFFFFF as u32 {
+        let bridge = InterAppEdge {
+            edge_type: EDGE_BRIDGE_TO,
+            source_lex: POLYMAIL_APP_LEX,
+            source_module: "polymail_calendar",
+            target_lex: "polylabs/polycalendar",
+            target_module: "polycalendar_scheduling",
+            bridge_scope: BridgeScope::Product as u8,
+            shared_fields: ["ical_event", "meeting_invite", "rsvp_status"],
+            redacted_fields: [],
+            bilateral_confirmed: false,
+        }
+        g = module_graph_add_bridge_edge(g, bridge, calendar_id)
+    }
+
+    g
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Governance Observation Edges
+// ═══════════════════════════════════════════════════════════════════════════════
+
+circuit polymail_register_governance_edges(
+    graph: CsrStorage,
+    governance_lex: string
+) -> CsrStorage
+    lex polylabs/polymail
+    @status production
+    @precision B
+    @attested true
+    observe metrics: [governance_edge_count]
+    meters [compute_cycles]
+{
+    let module_names = [
+        "polymail_rich_compose", "polymail_smtp_bridge", "polymail_route",
+        "polymail_encrypt", "polymail_classify", "polymail_filter",
+        "polymail_search", "polymail_calendar", "polymail_rbac",
+        "polymail_metering", "polymail_platform_health",
+        "mailbox_graph", "thread_dag",
+    ]
+    let g = graph
+    for name in module_names {
+        let module_id = find_poly_module_id(g, name)
+        if module_id != 0xFFFFFFFF as u32 {
+            g = module_graph_add_governance_observe_edge(g, GovernanceObserveEdge {
+                observer_lex: governance_lex,
+                observer_module: "governance_core",
+                observed_lex: POLYMAIL_APP_LEX,
+                observed_module: name,
+                observe_scope: "full",
+                read_only: true,
+                witness_chain_required: false,
+                refresh_interval_ms: 60000,
+            }, module_id)
+        }
+    }
+    g
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Metrics Store
+// ═══════════════════════════════════════════════════════════════════════════════
+
+store series polymail_app_graph_metrics
+    lex polylabs/polymail/metrics
+{
+    operation: string key
+    module_count: u32
+    edge_count: u32
+    bridge_count: u32
+    governance_edge_count: u32
+    register_latency_ns: u64
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Golden Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+extern "rust" {
+    #[module = "estream_runtime"]
+    #[api = "graph"]
+    #[state = "os"]
+    fn graph_create() -> CsrStorage
+}
+
+test golden "register_all_13_modules" {
+    exec {
+        let g = graph_create()
+        let g = polymail_app_graph_register(g)
+    }
+    assert {
+        g.num_nodes == 13
+        find_poly_module_id(g, "polymail_smtp_bridge") != 0xFFFFFFFF
+        find_poly_module_id(g, "polymail_encrypt") != 0xFFFFFFFF
+        find_poly_module_id(g, "thread_dag") != 0xFFFFFFFF
+    }
+}
+
+test golden "bridge_edges_to_polykit" {
+    exec {
+        let g = graph_create()
+        let g = polymail_app_graph_register(g)
+        let before_nodes = g.num_nodes
+        let g = polymail_register_bridge_edges(g)
+    }
+    assert {
+        g.num_nodes > before_nodes
+    }
+}
+
+test golden "governance_edges_all_modules" {
+    exec {
+        let g = graph_create()
+        let g = polymail_app_graph_register(g)
+        let before_edges = g.num_edges
+        let g = polymail_register_governance_edges(g, "polylabs/governance")
+    }
+    assert {
+        g.num_edges >= before_edges + 13
+    }
+}
