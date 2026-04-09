@@ -1,16 +1,16 @@
-# Poly Mail Architecture
+# Q Mail Architecture
 
 **Version**: 2.0
 **Date**: February 2026
 **Platform**: eStream v0.9.1
-**Upstream**: PolyKit v0.3.0, eStream graph/DAG constructs
+**Upstream**: QKit v0.3.0, eStream graph/DAG constructs
 **Build Pipeline**: FastLang (.fl) → FLIR → Rust/WASM codegen → .escd
 
 ---
 
 ## Overview
 
-Poly Mail is a post-quantum encrypted email service built on the eStream platform. Every email is E2E encrypted with ML-KEM-1024, scatter-distributed across multiple providers and jurisdictions, and authenticated via SPARK biometric keys. All cryptographic operations run in WASM (Rust). TypeScript is a DOM binding layer only.
+Q Mail is a post-quantum encrypted email service built on the eStream platform. Every email is E2E encrypted with ML-KEM-1024, scatter-distributed across multiple providers and jurisdictions, and authenticated via SPARK biometric keys. All cryptographic operations run in WASM (Rust). TypeScript is a DOM binding layer only.
 
 This document supersedes the v1.0 scaffold architecture. The email model is now expressed as eStream graph/DAG constructs with typed nodes, edges, overlays, CSR tiered storage, AI feeds, anomaly detection, and series attestation.
 
@@ -18,16 +18,16 @@ This document supersedes the v1.0 scaffold architecture. The email model is now 
 
 ## Zero-Linkage Privacy
 
-- **HKDF context**: `poly-mail-v1` — independent from all other Poly products
-- **Lex namespace**: `esn/global/org/polylabs/mail`
-- **user_id**: Derived from Poly Mail-specific ML-DSA-87 public key. Cannot be linked to Poly Messenger, Poly Data, or any other product identity.
-- **StreamSight**: `polylabs.mail.*` — no cross-product telemetry
-- **Metering**: Own `metering_graph` instance under `polylabs.mail.metering`
+- **HKDF context**: `q-mail-v1` — independent from all other Q products
+- **Lex namespace**: `esn/global/org/polyqlabs/mail`
+- **user_id**: Derived from Q Mail-specific ML-DSA-87 public key. Cannot be linked to Q Messenger, Poly Data, or any other product identity.
+- **StreamSight**: `polyqlabs.mail.*` — no cross-product telemetry
+- **Metering**: Own `metering_graph` instance under `polyqlabs.mail.metering`
 - **Billing**: Blinded payment tokens. Backend cannot correlate which SPARK identity uses which products.
 
 ### Enterprise Lex Bridge
 
-Enterprise admins can **opt-in** to cross-product visibility via an explicit lex bridge between `esn/global/org/polylabs/mail` and other product namespaces. The bridge is gated by k-of-n admin witness attestation and is revocable. Even with the bridge, individual user-level data is not cross-linked — only org-level aggregates and RBAC policy flow across products.
+Enterprise admins can **opt-in** to cross-product visibility via an explicit lex bridge between `esn/global/org/polyqlabs/mail` and other product namespaces. The bridge is gated by k-of-n admin witness attestation and is revocable. Even with the bridge, individual user-level data is not cross-linked — only org-level aggregates and RBAC policy flow across products.
 
 ---
 
@@ -35,7 +35,7 @@ Enterprise admins can **opt-in** to cross-product visibility via an explicit lex
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        Poly Mail Client                               │
+│                        Q Mail Client                               │
 │                                                                       │
 │  ┌────────────────────────────────────────────────────────────────┐  │
 │  │  React / Tauri UI                                               │  │
@@ -47,14 +47,14 @@ Enterprise admins can **opt-in** to cross-product visibility via an explicit lex
 │  │                                                                   │  │
 │  │  graph mailbox_registry  — accounts, folders, labels, contacts  │  │
 │  │  dag email_thread        — conversation threading + lifecycle   │  │
-│  │  graph user_graph        — per-product identity (from PolyKit) │  │
-│  │  graph metering_graph    — per-product metering (from PolyKit) │  │
+│  │  graph user_graph        — per-product identity (from QKit) │  │
+│  │  graph metering_graph    — per-product metering (from QKit) │  │
 │  └────────────────────────────┬───────────────────────────────────┘  │
 │                                │                                      │
 │  ┌────────────────────────────┴───────────────────────────────────┐  │
 │  │  FastLang Circuits (WASM via .escd)                              │  │
-│  │  polymail_encrypt │ polymail_route │ polymail_classify           │  │
-│  │  polymail_metering │ polymail_smtp_bridge                       │  │
+│  │  qmail_encrypt │ qmail_route │ qmail_classify           │  │
+│  │  qmail_metering │ qmail_smtp_bridge                       │  │
 │  └────────────────────────────┬───────────────────────────────────┘  │
 │                                │                                      │
 │  ┌────────────────────────────┴───────────────────────────────────┐  │
@@ -73,7 +73,7 @@ Enterprise admins can **opt-in** to cross-product visibility via an explicit lex
 
 ## Graph/DAG Constructs
 
-### Mailbox Registry (`polymail_mailbox_graph.fl`)
+### Mailbox Registry (`qmail_mailbox_graph.fl`)
 
 Accounts, folders, labels, and contacts form a Stratum graph with Cortex AI governance. Node types use `data` declarations with `store graph` and field-level visibility controls. Replaces flat mailbox tables with a relational model supporting hierarchical folders, multi-label assignment, contact resolution, quota enforcement, and folder sharing.
 
@@ -88,7 +88,7 @@ data MailboxNode : app v1 {
     tier: u8,
 }
     store graph
-    govern lex esn/global/org/polylabs/mail
+    govern lex esn/global/org/polyqlabs/mail
     cortex {
         obfuscate [owner_id]
         infer on_write
@@ -97,12 +97,12 @@ data MailboxNode : app v1 {
 
 data FolderNode : app v1 { ... }
     store graph
-    govern lex esn/global/org/polylabs/mail
+    govern lex esn/global/org/polyqlabs/mail
     cortex { infer on_write }
 
 data LabelNode : app v1 { ... }
     store graph
-    govern lex esn/global/org/polylabs/mail
+    govern lex esn/global/org/polyqlabs/mail
     cortex { infer on_read }
 
 data MailContactNode : app v1 {
@@ -117,7 +117,7 @@ data MailContactNode : app v1 {
     trust_score: f32,
 }
     store graph
-    govern lex esn/global/org/polylabs/mail
+    govern lex esn/global/org/polyqlabs/mail
     cortex {
         redact [email_address]
         obfuscate [display_name, user_id]
@@ -165,7 +165,7 @@ series mailbox_series: mailbox_registry
 
 Key circuits: `create_mailbox`, `create_folder`, `move_to_folder`, `create_label`, `apply_label`, `add_contact`, `resolve_contact`, `share_folder`, `check_quota`, `snapshot_mailbox`.
 
-### Email Thread DAG (`polymail_thread_dag.fl`)
+### Email Thread DAG (`qmail_thread_dag.fl`)
 
 Emails form a Stratum DAG with Cortex AI governance, ML-DSA-87 signing, merkle CSR storage, and PoVC attestation. Replies create parent edges. Forwards branch. Cortex classifies incoming email on write (spam, phishing, priority) and stores suggestions for inbox intelligence.
 
@@ -185,7 +185,7 @@ data EmailNode : app v1 {
     pq_signature: bytes(4627),
 }
     store dag
-    govern lex esn/global/org/polylabs/mail
+    govern lex esn/global/org/polyqlabs/mail
     cortex {
         redact [content_hash, subject_preview]
         obfuscate [sender_id, recipient_ids]
@@ -259,7 +259,7 @@ Key circuits: `compose_draft`, `send_email`, `receive_email`, `mark_read`, `star
 
 ## Stratum & Cortex Integration
 
-Poly Mail fully composes Stratum storage and Cortex AI governance via the v0.10.0 `data` declaration pattern (`store graph/dag`, `govern lex`, `cortex {}`).
+Q Mail fully composes Stratum storage and Cortex AI governance via the v0.10.0 `data` declaration pattern (`store graph/dag`, `govern lex`, `cortex {}`).
 
 ### Stratum Storage Bindings
 
@@ -320,7 +320,7 @@ Both constructs support `.q` quantum state snapshots for mailbox backup, migrati
 
 ---
 
-## SMTP Bridge (`polymail_smtp_bridge.fl`)
+## SMTP Bridge (`qmail_smtp_bridge.fl`)
 
 Classical email gateway circuit for inbound/outbound SMTP/IMAP interoperability. This runs as a local bridge on the user's device (like Proton Mail Bridge) and as a server-side gateway for custom domains.
 
@@ -337,10 +337,10 @@ Conventional Client <-> IMAP/SMTP <-> Local Bridge <-> eStream Wire Protocol
 ### Server-Side Gateway (Custom Domains)
 
 ```
-External Internet <-> MX records -> Poly Mail SMTP Gateway
+External Internet <-> MX records -> Q Mail SMTP Gateway
                                         |
                                         v
-                              polymail_smtp_bridge.fl
+                              qmail_smtp_bridge.fl
                                         |
                     +-------------------+-------------------+
                     |                                       |
@@ -368,18 +368,18 @@ All classification runs client-side in WASM. Email content never leaves the user
 
 ---
 
-## PolyKit Composition
+## QKit Composition
 
-All circuits compose eStream upstream primitives via PolyKit profiles:
+All circuits compose eStream upstream primitives via QKit profiles:
 
-| PolyKit Profile | Usage |
+| QKit Profile | Usage |
 |-----------------|-------|
 | `poly_framework_standard` | Mail routing, folder management, contact resolution, search |
 | `poly_framework_sensitive` | Encryption, SMTP bridge, spam classification, key management |
 
 ### RBAC
 
-Composes `rbac.fl` via PolyKit for per-mailbox and per-folder access control:
+Composes `rbac.fl` via QKit for per-mailbox and per-folder access control:
 
 - `mailbox:owner` — full control
 - `mailbox:delegate` — send on behalf, read inbox
@@ -405,7 +405,7 @@ Composes `group_hierarchy.fl` for enterprise organizations:
 | PRO | $9.99/mo | 50 GB | 5 domains | 5-of-7 | Priority relay, advanced search |
 | ENTERPRISE | Custom | Custom | Unlimited | 7-of-9+ | Admin console, compliance, SLA |
 
-Tier enforcement via PolyKit `metering_graph` + `subscription_lifecycle` state machine.
+Tier enforcement via QKit `metering_graph` + `subscription_lifecycle` state machine.
 
 ---
 
@@ -424,20 +424,20 @@ Email search is entirely client-side:
 ## Directory Structure
 
 ```
-polymail/
+qmail/
 ├── circuits/fl/
-│   ├── polymail_encrypt.fl
-│   ├── polymail_route.fl
-│   ├── polymail_classify.fl
-│   ├── polymail_metering.fl
-│   ├── polymail_smtp_bridge.fl
+│   ├── qmail_encrypt.fl
+│   ├── qmail_route.fl
+│   ├── qmail_classify.fl
+│   ├── qmail_metering.fl
+│   ├── qmail_smtp_bridge.fl
 │   └── graphs/
-│       ├── polymail_mailbox_graph.fl
-│       └── polymail_thread_dag.fl
+│       ├── qmail_mailbox_graph.fl
+│       └── qmail_thread_dag.fl
 ├── crates/
 │   ├── poly-mail-core/
 │   ├── poly-smtp-bridge/
-│   └── poly-sdk-backend/
+│   └── q-sdk-backend/
 ├── packages/
 │   ├── sdk-browser/
 │   └── poly-mail-widget/
@@ -458,12 +458,12 @@ polymail/
 - `mailbox_registry` graph + `email_thread` DAG
 - FastLang circuits for encryption, routing, classification
 - Tauri desktop client
-- SPARK auth (`poly-mail-v1`)
+- SPARK auth (`q-mail-v1`)
 - Poly-to-Poly encrypted email
 - Client-side search
 
 ### Phase 2: Interop (Q3-Q4 2026)
-- `polymail_smtp_bridge.fl` local bridge
+- `qmail_smtp_bridge.fl` local bridge
 - External email send/receive
 - Custom domains with PQ-signed DKIM
 - Mobile apps (iOS, Android)
@@ -478,6 +478,6 @@ polymail/
 
 ### Phase 4: Advanced (2027+)
 - ESLM smart inbox (priority sorting, auto-categorization)
-- Calendar integration (Poly Calendar)
-- Poly Mind integration (email corpus ingestion)
+- Calendar integration (Q Calendar)
+- Q Mind integration (email corpus ingestion)
 - FPGA-accelerated encryption for high-volume enterprise

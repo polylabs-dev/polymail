@@ -11,7 +11,7 @@ pub struct PolymailJourney;
 
 impl Journey for PolymailJourney {
     fn name(&self) -> &str {
-        "polymail_e2e"
+        "qmail_e2e"
     }
 
     fn description(&self) -> &str {
@@ -21,13 +21,13 @@ impl Journey for PolymailJourney {
     fn parties(&self) -> Vec<JourneyParty> {
         vec![
             JourneyParty::new("alice")
-                .with_spark_context("poly-mail-v1")
+                .with_spark_context("q-mail-v1")
                 .with_role("sender"),
             JourneyParty::new("bob")
-                .with_spark_context("poly-mail-v1")
+                .with_spark_context("q-mail-v1")
                 .with_role("recipient"),
             JourneyParty::new("charlie")
-                .with_spark_context("poly-mail-v1")
+                .with_spark_context("q-mail-v1")
                 .with_role("cc_recipient"),
         ]
     }
@@ -41,7 +41,7 @@ impl Journey for PolymailJourney {
                     let bob_id = ctx.party_id("bob");
                     let charlie_id = ctx.party_id("charlie");
 
-                    let email = ctx.polymail().compose(
+                    let email = ctx.qmail().compose(
                         &[&bob_id],
                         &[&charlie_id],
                         "Q4 Lattice Results",
@@ -57,12 +57,12 @@ impl Journey for PolymailJourney {
                     assert_eq!(email.kem_algo, "ml-kem-1024");
                     assert_eq!(email.recipients.len(), 2);
 
-                    assert_metric_emitted!(ctx, "polymail.email.composed", {
+                    assert_metric_emitted!(ctx, "qmail.email.composed", {
                         "kem_algo" => "ml-kem-1024",
                         "attachment_count" => "1",
                     });
 
-                    assert_povc_witness!(ctx, "polymail.compose", {
+                    assert_povc_witness!(ctx, "qmail.compose", {
                         witness_type: "email_creation",
                         email_id: &email.id,
                     });
@@ -78,7 +78,7 @@ impl Journey for PolymailJourney {
                 .action(StepAction::Execute(|ctx: &mut ConvoyContext| {
                     let email_id = ctx.get::<String>("email_id");
 
-                    let delivery = ctx.polymail().send_via_bridge(&email_id)?;
+                    let delivery = ctx.qmail().send_via_bridge(&email_id)?;
 
                     assert!(delivery.smtp_handshake_ok);
                     assert!(delivery.tls_version >= "1.3");
@@ -91,17 +91,17 @@ impl Journey for PolymailJourney {
 
                     ctx.set("delivery_id", &delivery.id);
 
-                    assert_metric_emitted!(ctx, "polymail.smtp.delivered", {
+                    assert_metric_emitted!(ctx, "qmail.smtp.delivered", {
                         "pq_tunnel" => "true",
                         "tls_version" => "1.3",
                     });
 
-                    assert_blinded!(ctx, "polymail.smtp.delivered", {
+                    assert_blinded!(ctx, "qmail.smtp.delivered", {
                         field: "envelope_sender",
                         blinding: "hmac_sha3",
                     });
 
-                    assert_povc_witness!(ctx, "polymail.delivery", {
+                    assert_povc_witness!(ctx, "qmail.delivery", {
                         witness_type: "smtp_bridge",
                         email_id: &email_id,
                     });
@@ -117,11 +117,11 @@ impl Journey for PolymailJourney {
                 .action(StepAction::Execute(|ctx: &mut ConvoyContext| {
                     let thread_id = ctx.get::<String>("thread_id");
 
-                    let inbox = ctx.polymail().poll_inbox()?;
+                    let inbox = ctx.qmail().poll_inbox()?;
                     let email = inbox.find_by_thread(&thread_id)
                         .expect("Email not found in Bob's inbox");
 
-                    let decrypted = ctx.polymail().decrypt(&email)?;
+                    let decrypted = ctx.qmail().decrypt(&email)?;
 
                     assert_eq!(decrypted.subject, "Q4 Lattice Results");
                     assert!(decrypted.body.contains("ML-KEM-1024 throughput"));
@@ -129,12 +129,12 @@ impl Journey for PolymailJourney {
                     assert_eq!(decrypted.attachments[0].name, "benchmarks.csv");
                     assert!(decrypted.signature_valid);
 
-                    assert_metric_emitted!(ctx, "polymail.email.received", {
+                    assert_metric_emitted!(ctx, "qmail.email.received", {
                         "decrypted" => "true",
                         "signature_valid" => "true",
                     });
 
-                    assert_blinded!(ctx, "polymail.email.received", {
+                    assert_blinded!(ctx, "qmail.email.received", {
                         field: "recipient_id",
                         blinding: "hmac_sha3",
                     });
@@ -151,14 +151,14 @@ impl Journey for PolymailJourney {
                     let thread_id = ctx.get::<String>("thread_id");
 
                     // Bob replies to build a thread
-                    let reply = ctx.polymail().reply(
+                    let reply = ctx.qmail().reply(
                         &thread_id,
                         "Thanks — numbers look great. Will share with the board.",
                     )?;
 
                     ctx.set("reply_id", &reply.id);
 
-                    let dag = ctx.polymail().thread_dag(&thread_id)?;
+                    let dag = ctx.qmail().thread_dag(&thread_id)?;
 
                     assert!(dag.is_valid_dag());
                     assert_eq!(dag.node_count(), 2); // original + reply
@@ -170,12 +170,12 @@ impl Journey for PolymailJourney {
                         assert!(node.hash_chain_valid);
                     }
 
-                    assert_metric_emitted!(ctx, "polymail.thread.dag_verified", {
+                    assert_metric_emitted!(ctx, "qmail.thread.dag_verified", {
                         "node_count" => "2",
                         "dag_valid" => "true",
                     });
 
-                    assert_povc_witness!(ctx, "polymail.thread", {
+                    assert_povc_witness!(ctx, "qmail.thread", {
                         witness_type: "dag_integrity",
                         thread_id: &thread_id,
                     });
@@ -189,30 +189,30 @@ impl Journey for PolymailJourney {
                 .party("charlie")
                 .depends_on(&["verify_thread_dag"])
                 .action(StepAction::Execute(|ctx: &mut ConvoyContext| {
-                    let inbox = ctx.polymail().poll_inbox()?;
+                    let inbox = ctx.qmail().poll_inbox()?;
                     let thread_id = ctx.get::<String>("thread_id");
 
                     let email = inbox.find_by_thread(&thread_id)
                         .expect("Email not found in Charlie's inbox");
 
-                    let classification = ctx.polymail().classify_spam(&email)?;
+                    let classification = ctx.qmail().classify_spam(&email)?;
 
                     assert_eq!(classification.verdict, "ham");
                     assert!(classification.confidence > 0.95);
                     assert!(classification.ran_locally, "Spam classification must run on-device");
 
                     // Classification must not leak content to any server
-                    assert_blinded!(ctx, "polymail.spam.classified", {
+                    assert_blinded!(ctx, "qmail.spam.classified", {
                         field: "email_body",
                         blinding: "absent",
                     });
 
-                    assert_blinded!(ctx, "polymail.spam.classified", {
+                    assert_blinded!(ctx, "qmail.spam.classified", {
                         field: "email_subject",
                         blinding: "absent",
                     });
 
-                    assert_metric_emitted!(ctx, "polymail.spam.classified", {
+                    assert_metric_emitted!(ctx, "qmail.spam.classified", {
                         "verdict" => "ham",
                         "local_only" => "true",
                     });
@@ -241,7 +241,7 @@ impl Journey for PolymailJourney {
                     assert!(merkle.root_hash_valid);
                     assert!(merkle.series_count >= 2);
 
-                    assert_metric_emitted!(ctx, "polymail.stratum.verified", {
+                    assert_metric_emitted!(ctx, "qmail.stratum.verified", {
                         "csr_tier" => "warm",
                         "chain_intact" => "true",
                     });
@@ -255,7 +255,7 @@ impl Journey for PolymailJourney {
                 .party("alice")
                 .depends_on(&["verify_stratum_storage"])
                 .action(StepAction::Execute(|ctx: &mut ConvoyContext| {
-                    let telemetry = ctx.streamsight().drain_telemetry("poly-mail-v1");
+                    let telemetry = ctx.streamsight().drain_telemetry("q-mail-v1");
 
                     for event in &telemetry {
                         assert_blinded!(ctx, &event.event_type, {
@@ -275,15 +275,15 @@ impl Journey for PolymailJourney {
                     }
 
                     let cortex = CortexVisibility::new(ctx);
-                    cortex.assert_redacted("polymail", RedactPolicy::ContentFields)?;
-                    cortex.assert_obfuscated("polymail", ObfuscatePolicy::PartyIdentifiers)?;
+                    cortex.assert_redacted("qmail", RedactPolicy::ContentFields)?;
+                    cortex.assert_obfuscated("qmail", ObfuscatePolicy::PartyIdentifiers)?;
 
                     assert!(telemetry.len() >= 6, "Expected at least 6 telemetry events");
 
                     for event in &telemetry {
                         assert!(
-                            event.namespace.starts_with("poly-mail-v1"),
-                            "Telemetry leaked outside poly-mail-v1 namespace: {}",
+                            event.namespace.starts_with("q-mail-v1"),
+                            "Telemetry leaked outside q-mail-v1 namespace: {}",
                             event.namespace
                         );
                     }
@@ -297,16 +297,16 @@ impl Journey for PolymailJourney {
     fn metrics(&self) -> JourneyMetrics {
         JourneyMetrics {
             expected_events: vec![
-                "polymail.email.composed",
-                "polymail.smtp.delivered",
-                "polymail.email.received",
-                "polymail.thread.dag_verified",
-                "polymail.spam.classified",
-                "polymail.stratum.verified",
+                "qmail.email.composed",
+                "qmail.smtp.delivered",
+                "qmail.email.received",
+                "qmail.thread.dag_verified",
+                "qmail.spam.classified",
+                "qmail.stratum.verified",
             ],
             max_duration_ms: 75_000,
             required_povc_witnesses: 4,
-            lex_namespace: "poly-mail-v1",
+            lex_namespace: "q-mail-v1",
         }
     }
 }
@@ -317,10 +317,10 @@ mod tests {
     use estream_test::convoy::ConvoyRunner;
 
     #[tokio::test]
-    async fn run_polymail_journey() {
+    async fn run_qmail_journey() {
         let runner = ConvoyRunner::new()
             .with_smtp_bridge()
-            .with_streamsight("poly-mail-v1")
+            .with_streamsight("q-mail-v1")
             .with_stratum()
             .with_cortex();
 

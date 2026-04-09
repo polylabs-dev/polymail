@@ -1,14 +1,14 @@
-// Poly Mail SMTP Bridge — SMTP/IMAP interop for classical email clients (v0.12.0)
+// Q Mail SMTP Bridge — SMTP/IMAP interop for classical email clients (v0.12.0)
 //
 // Local bridge: localhost IMAP (1143) / SMTP (1025) for Thunderbird, Outlook, etc.
-// Server-side gateway: MX records → Poly Mail ingest with PQ re-encryption.
+// Server-side gateway: MX records → Q Mail ingest with PQ re-encryption.
 //
 // DKIM signing uses ML-DSA-87 (PQ) for custom domains when the recipient
 // supports PQ DKIM verification, falling back to Ed25519 for compatibility.
 // SPF and DMARC are enforced on inbound.
 
-import polykit_identity
-import polykit_metering
+import qkit_identity
+import qkit_metering
 
 data SmtpSession : mail v1 {
     session_id: bytes(16),
@@ -20,7 +20,7 @@ data SmtpSession : mail v1 {
     state: SmtpState,
 }
     store kv
-    govern lex global/org/polylabs/mail/bridge
+    govern lex global/org/polyqlabs/mail/bridge
     cortex {
         obfuscate [client_addr]
         infer on_write
@@ -46,7 +46,7 @@ data ImapFolder : mail v1 {
     unseen_count: u32,
 }
     store kv
-    govern lex global/org/polylabs/mail/bridge
+    govern lex global/org/polyqlabs/mail/bridge
     cortex {
         infer on_write
         on_anomaly alert "mail-team"
@@ -62,7 +62,7 @@ data DkimSignature : mail v1 {
     timestamp: u64,
 }
     store kv
-    govern lex global/org/polylabs/mail/bridge
+    govern lex global/org/polyqlabs/mail/bridge
     cortex {
         infer on_write
         on_anomaly alert "mail-security"
@@ -95,14 +95,14 @@ type PolymailMessage = struct {
     timestamp: u64,
 }
 
-// --- Receive inbound SMTP email and convert to Poly Mail format ---
+// --- Receive inbound SMTP email and convert to Q Mail format ---
 circuit smtp_receive(
     session: SmtpSession,
     raw_data: bytes,
     recipient_encryption_pk: bytes(1568),
 ) -> PolymailMessage
     profile poly_framework_sensitive
-    lex global/org/polylabs/mail/bridge
+    lex global/org/polyqlabs/mail/bridge
     @precision C
     @observe metrics: [smtp_inbound, mime_conversions, dkim_verifications, spf_checks]
     monitor "smtp_receive_latency" { receive_latency_ms < 1000 }
@@ -115,27 +115,27 @@ circuit smtp_receive(
     let dkim_valid = dkim_verify(raw_data)
     assert dkim_valid == true
     let spf_valid = spf_check(session.client_addr, mime.from_header)
-    let polymail_msg = mime_to_polymail(mime)
-    polymail_msg
+    let qmail_msg = mime_to_qmail(mime)
+    qmail_msg
 }
 
-// --- Send outbound email via SMTP from Poly Mail ---
+// --- Send outbound email via SMTP from Q Mail ---
 circuit smtp_send(
-    polymail_msg: PolymailMessage,
+    qmail_msg: PolymailMessage,
     sender_signing_sk: bytes(4896),
     sender_domain: bytes(253),
     dkim_selector: bytes(63),
     recipient_addresses: [bytes(254)],
 ) -> SmtpSession
     profile poly_framework_sensitive
-    lex global/org/polylabs/mail/bridge
+    lex global/org/polyqlabs/mail/bridge
     @precision C
     @observe metrics: [smtp_outbound, dkim_signatures_created, delivery_attempts]
     monitor "smtp_send_latency" { send_latency_ms < 5000 }
     meters [compute_cycles, bandwidth]
     wasm_abi [smtp_relay, random_bytes, now]
 {
-    let mime = polymail_to_mime(polymail_msg)
+    let mime = qmail_to_mime(qmail_msg)
     let dkim = dkim_sign(sender_signing_sk, sender_domain, dkim_selector, mime)
     let session_id = random_bytes(16)
     let ts = now()
@@ -146,20 +146,20 @@ circuit smtp_send(
         client_addr: bytes(16),
         authenticated: true,
         tls_version: bytes("TLSv1.3"),
-        mail_from: polymail_msg.sender_id,
+        mail_from: qmail_msg.sender_id,
         rcpt_to: recipient_addresses,
         state: SmtpState::Completed,
     }
 }
 
-// --- Sync IMAP folder state from local Poly Mail mailbox ---
+// --- Sync IMAP folder state from local Q Mail mailbox ---
 circuit imap_sync(
     mailbox_id: bytes(16),
     folder_name: bytes(128),
     last_uid: u32,
 ) -> ImapFolder
     profile poly_framework_standard
-    lex global/org/polylabs/mail/bridge
+    lex global/org/polyqlabs/mail/bridge
     @precision C
     @observe metrics: [imap_syncs, messages_synced, folder_updates]
     wasm_abi [eslite_query]
@@ -184,7 +184,7 @@ circuit dkim_sign(
     mime: MimeMessage,
 ) -> DkimSignature
     profile poly_framework_sensitive
-    lex global/org/polylabs/mail/bridge
+    lex global/org/polyqlabs/mail/bridge
     @precision C
     constant_time true
     @observe metrics: [dkim_sign_ops, pq_dkim_signatures]
@@ -209,7 +209,7 @@ circuit dkim_sign(
 // --- DKIM verify (supports both ML-DSA-87 and classical) ---
 circuit dkim_verify(raw_email: bytes) -> bool
     profile poly_framework_standard
-    lex global/org/polylabs/mail/bridge
+    lex global/org/polyqlabs/mail/bridge
     @precision C
     @observe metrics: [dkim_verify_ops, dkim_pass, dkim_fail]
 {
@@ -225,10 +225,10 @@ circuit dkim_verify(raw_email: bytes) -> bool
     }
 }
 
-// --- Convert MIME message to Poly Mail internal format ---
-circuit mime_to_polymail(mime: MimeMessage) -> PolymailMessage
+// --- Convert MIME message to Q Mail internal format ---
+circuit mime_to_qmail(mime: MimeMessage) -> PolymailMessage
     profile poly_framework_standard
-    lex global/org/polylabs/mail/bridge
+    lex global/org/polyqlabs/mail/bridge
     @precision C
     @observe metrics: [mime_to_poly_conversions]
 {
@@ -248,10 +248,10 @@ circuit mime_to_polymail(mime: MimeMessage) -> PolymailMessage
     }
 }
 
-// --- Convert Poly Mail message to MIME for SMTP delivery ---
-circuit polymail_to_mime(msg: PolymailMessage) -> MimeMessage
+// --- Convert Q Mail message to MIME for SMTP delivery ---
+circuit qmail_to_mime(msg: PolymailMessage) -> MimeMessage
     profile poly_framework_standard
-    lex global/org/polylabs/mail/bridge
+    lex global/org/polyqlabs/mail/bridge
     @precision C
     @observe metrics: [poly_to_mime_conversions]
 {
@@ -300,10 +300,10 @@ test golden "smtp_receive_and_convert" {
             authenticated: true,
             tls_version: bytes("TLSv1.3"),
             mail_from: bytes("alice@example.com"),
-            rcpt_to: [bytes("bob@polylabs.dev")],
+            rcpt_to: [bytes("bob@polyqlabs.dev")],
             state: SmtpState::Data,
         }
-        raw_data: bytes("From: alice@example.com\r\nTo: bob@polylabs.dev\r\nSubject: Hello\r\n\r\nHi Bob!")
+        raw_data: bytes("From: alice@example.com\r\nTo: bob@polyqlabs.dev\r\nSubject: Hello\r\n\r\nHi Bob!")
         recipient_encryption_pk: test_key("bob_mlkem_pk")
     }
     assert {
@@ -317,11 +317,11 @@ test golden "dkim_sign_verify_roundtrip" {
     input {
         signing_sk: test_key("dkim_mldsa_sk")
         signing_pk: test_key("dkim_mldsa_pk")
-        domain: bytes("polylabs.dev")
+        domain: bytes("polyqlabs.dev")
         selector: bytes("pq202601")
         mime: MimeMessage {
-            message_id: bytes("msg-001@polylabs.dev"),
-            from_header: bytes("alice@polylabs.dev"),
+            message_id: bytes("msg-001@polyqlabs.dev"),
+            from_header: bytes("alice@polyqlabs.dev"),
             to_headers: [bytes("bob@example.com")],
             subject: bytes("Test DKIM"),
             date: 1700000000,
@@ -332,7 +332,7 @@ test golden "dkim_sign_verify_roundtrip" {
                 data: bytes("Hello World"),
                 filename: bytes(0),
             }],
-            raw_headers: bytes("From: alice@polylabs.dev\r\nTo: bob@example.com\r\n"),
+            raw_headers: bytes("From: alice@polyqlabs.dev\r\nTo: bob@example.com\r\n"),
         }
     }
     assert {

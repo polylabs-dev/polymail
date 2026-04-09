@@ -1,4 +1,4 @@
-// Poly Mail Encrypt — E2E email encryption with ML-KEM-1024 (v0.12.0)
+// Q Mail Encrypt — E2E email encryption with ML-KEM-1024 (v0.12.0)
 //
 // Multi-recipient envelope encryption: each email is encrypted with a
 // random AES-256-GCM content key, then that key is wrapped per-recipient
@@ -12,8 +12,8 @@
 //   attachment_key (random 32 bytes per attachment)
 //     +-- AES-256-GCM encrypt(attachment_data)
 
-import polykit_identity
-import polykit_metering
+import qkit_identity
+import qkit_metering
 
 type EmailKey = bytes(32)
 type AttachmentKey = bytes(32)
@@ -37,7 +37,7 @@ data EncryptedEmail : mail v1 {
     sender_signature: bytes(4627),
 }
     store kv
-    govern lex global/org/polylabs/mail/encrypt
+    govern lex global/org/polyqlabs/mail/encrypt
     cortex {
         obfuscate [sender_id]
         infer on_write
@@ -59,7 +59,7 @@ data EncryptedAttachment : mail v1 {
     content_hash: bytes(32),
 }
     store kv
-    govern lex global/org/polylabs/mail/encrypt
+    govern lex global/org/polyqlabs/mail/encrypt
     cortex {
         infer on_write
         on_anomaly alert "mail-team"
@@ -73,7 +73,7 @@ circuit encrypt_email(
     recipient_pubkeys: [RecipientKeyBundle],
 ) -> EncryptedEmail
     profile poly_framework_sensitive
-    lex global/org/polylabs/mail/encrypt
+    lex global/org/polyqlabs/mail/encrypt
     @precision C
     constant_time true
     @observe metrics: [emails_encrypted, encrypt_latency_ms, recipient_key_wraps]
@@ -116,7 +116,7 @@ circuit decrypt_email(
     recipient_id: bytes(16),
 ) -> DecryptedEmail
     profile poly_framework_sensitive
-    lex global/org/polylabs/mail/encrypt
+    lex global/org/polyqlabs/mail/encrypt
     @precision C
     constant_time true
     @observe metrics: [emails_decrypted, decrypt_failures, signature_verifications]
@@ -143,7 +143,7 @@ circuit decrypt_email(
 // --- Encrypt a single attachment with an independent key ---
 circuit encrypt_attachment(attachment_data: bytes) -> (EncryptedAttachment, AttachmentKey)
     profile poly_framework_sensitive
-    lex global/org/polylabs/mail/encrypt
+    lex global/org/polyqlabs/mail/encrypt
     @precision C
     constant_time true
     @observe metrics: [attachments_encrypted, attachment_bytes_encrypted]
@@ -168,7 +168,7 @@ circuit encrypt_attachment(attachment_data: bytes) -> (EncryptedAttachment, Atta
 // --- Decrypt a single attachment ---
 circuit decrypt_attachment(att_key: AttachmentKey, attachment: EncryptedAttachment) -> bytes
     profile poly_framework_sensitive
-    lex global/org/polylabs/mail/encrypt
+    lex global/org/polyqlabs/mail/encrypt
     @precision C
     constant_time true
     @observe metrics: [attachments_decrypted, attachment_bytes_decrypted]
@@ -182,7 +182,7 @@ circuit decrypt_attachment(att_key: AttachmentKey, attachment: EncryptedAttachme
 // --- Wrap email content key for a single recipient via ML-KEM-1024 ---
 circuit wrap_recipient_key(email_key: EmailKey, recipient_pk: bytes(1568), recipient_id: bytes(16)) -> RecipientKeyBundle
     profile poly_framework_sensitive
-    lex global/org/polylabs/mail/encrypt
+    lex global/org/polyqlabs/mail/encrypt
     @precision C
     constant_time true
     @observe metrics: [key_wraps]
@@ -201,7 +201,7 @@ circuit wrap_recipient_key(email_key: EmailKey, recipient_pk: bytes(1568), recip
 // --- Unwrap email content key as the recipient ---
 circuit unwrap_recipient_key(recipient_sk: bytes(3168), wrapped_ciphertext: bytes(1568)) -> EmailKey
     profile poly_framework_sensitive
-    lex global/org/polylabs/mail/encrypt
+    lex global/org/polyqlabs/mail/encrypt
     @precision C
     constant_time true
     @observe metrics: [key_unwraps, unwrap_failures]
@@ -223,7 +223,7 @@ monitor "email_encrypt_throughput" {
 
 test golden "encrypt_decrypt_email_roundtrip" {
     input {
-        plaintext: bytes("Subject: Test\r\nFrom: alice@polylabs.dev\r\n\r\nHello Bob!")
+        plaintext: bytes("Subject: Test\r\nFrom: alice@polyqlabs.dev\r\n\r\nHello Bob!")
         sender_sk: test_key("sender_mldsa_sk")
         sender_pk: test_key("sender_mldsa_pk")
         sender_id: bytes(16, 0xAA)

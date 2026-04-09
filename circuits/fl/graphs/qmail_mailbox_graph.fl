@@ -1,6 +1,6 @@
-/// Poly Mail Mailbox Graph — graph mailbox_registry (v0.12.0)
+/// Q Mail Mailbox Graph — graph mailbox_registry (v0.12.0)
 /// Stratum graph storage + Cortex AI governance
-/// govern lex global/org/polylabs/mail
+/// govern lex global/org/polyqlabs/mail
 ///
 /// Accounts, folders, labels, and contacts form a typed property graph.
 /// Replaces flat mailbox tables with relational model supporting
@@ -10,9 +10,9 @@
 /// Storage: CSR tiered (BRAM -> DDR -> NVMe)
 /// Cortex: field-level redact/obfuscate, on_write inference, anomaly alerts
 
-import polykit_identity
-import polykit_metering
-import polykit_governance
+import qkit_identity
+import qkit_metering
+import qkit_governance
 
 // ── Data: Node types (Stratum store graph + Cortex) ─────────────
 
@@ -26,7 +26,7 @@ data MailboxNode : mail v1 {
     tier: u8,
 }
     store graph
-    govern lex global/org/polylabs/mail
+    govern lex global/org/polyqlabs/mail
     cortex {
         obfuscate [owner_id]
         infer on_write
@@ -41,7 +41,7 @@ data FolderNode : mail v1 {
     system_folder: u8,
 }
     store graph
-    govern lex global/org/polylabs/mail
+    govern lex global/org/polyqlabs/mail
     cortex {
         infer on_write
     }
@@ -53,7 +53,7 @@ data LabelNode : mail v1 {
     auto_apply_rule: bytes(256),
 }
     store graph
-    govern lex global/org/polylabs/mail
+    govern lex global/org/polyqlabs/mail
     cortex {
         infer on_read
     }
@@ -70,7 +70,7 @@ data MailContactNode : mail v1 {
     trust_score: f32,
 }
     store graph
-    govern lex global/org/polylabs/mail
+    govern lex global/org/polyqlabs/mail
     cortex {
         redact [email_address]
         obfuscate [display_name, user_id]
@@ -151,7 +151,7 @@ circuit create_mailbox(
     domain: bytes(253),
     tier: u8,
 ) -> MailboxNode
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -163,8 +163,8 @@ circuit create_mailbox(
         let node = create_mailbox(
             bytes(32, 0x01),
             bytes(16, 0xAA),
-            "alice@polylabs.dev",
-            "polylabs.dev",
+            "alice@polyqlabs.dev",
+            "polyqlabs.dev",
             0
         )
         assert node.tier == 0
@@ -236,7 +236,7 @@ circuit create_folder(
     name: bytes(128),
     parent_folder_id: bytes(16),
 ) -> FolderNode
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -270,7 +270,7 @@ circuit move_to_folder(
     source_folder_id: bytes(16),
     target_folder_id: bytes(16),
 ) -> bool
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -302,7 +302,7 @@ circuit create_label(
     color: u32,
     auto_apply_rule: bytes(256),
 ) -> LabelNode
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -331,7 +331,7 @@ circuit apply_label(
     label_id: bytes(16),
     applied_by: u8,
 ) -> bool
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -361,7 +361,7 @@ circuit add_contact(
     encryption_pubkey: bytes(1568),
     is_poly_user: bool,
 ) -> MailContactNode
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -373,7 +373,7 @@ circuit add_contact(
             bytes(32, 0x01),
             bytes(16, 0xAA),
             "Bob Smith",
-            "bob@polylabs.dev",
+            "bob@polyqlabs.dev",
             bytes(2592, 0x00),
             bytes(1568, 0x00),
             true
@@ -411,7 +411,7 @@ circuit resolve_contact(
     mailbox_id: bytes(16),
     email_address: bytes(254),
 ) -> MailContactNode
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision B
     @observe metrics: [contact_lookups, contact_misses, directory_hits]
@@ -457,7 +457,7 @@ circuit share_folder(
     target_mailbox_id: bytes(16),
     permission: u8,
 ) -> bool
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -484,7 +484,7 @@ circuit check_quota(
     mailbox_id: bytes(16),
     incoming_size: u64,
 ) -> bool
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision B
     @observe metrics: [quota_checks, quota_exceeded, utilization_pct]
@@ -506,7 +506,7 @@ circuit snapshot_mailbox(
     graph_id: bytes(32),
     mailbox_id: bytes(16),
 ) -> bytes(32)
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision B
     @attested true

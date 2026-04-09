@@ -2,12 +2,12 @@
 /// App Graph for PolyMail — 13 ModuleNode definitions composing the PQ-encrypted
 /// email platform into Compose, Transport, Intelligence, Platform, and Graph
 /// partitions. Registers intra-graph REQUIRES edges and cross-graph BRIDGE_TO
-/// edges to PolyKit and PolyCalendar.
+/// edges to QKit and PolyCalendar.
 ///
-/// Epic: polymail#TBD (CE + App Graph Integration)
-/// govern lex polylabs/polymail
+/// Epic: qmail#TBD (CE + App Graph Integration)
+/// govern lex polyqlabs/qmail
 
-lex polylabs/polymail
+lex polyqlabs/qmail
 
 @target software
 @codegen_targets ["wasm", "rust"]
@@ -29,7 +29,7 @@ import "core/deployment/cross_graph_edges.fl" {
     module_graph_add_governance_observe_edge,
 }
 
-import "polykit/circuits/fl/polykit_app_graph.fl" {
+import "qkit/circuits/fl/qkit_app_graph.fl" {
     ProductGraphConfig, find_poly_module_id,
 }
 
@@ -38,14 +38,14 @@ import "polykit/circuits/fl/polykit_app_graph.fl" {
 const POLYMAIL_VERSION_MAJOR: u32 = 0
 const POLYMAIL_VERSION_MINOR: u32 = 1
 const POLYMAIL_VERSION_PATCH: u32 = 0
-const POLYMAIL_APP_LEX: string = "polylabs/polymail"
+const POLYMAIL_APP_LEX: string = "polyqlabs/qmail"
 const POLYMAIL_VERSION_STR: string = "0.1.0"
 const POLYMAIL_MODULE_COUNT: u64 = 13
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-circuit polymail_placeholder_receipt() -> CompilationReceipt
-    lex polylabs/polymail
+circuit qmail_placeholder_receipt() -> CompilationReceipt
+    lex polyqlabs/qmail
     @status production
     @precision D
 {
@@ -65,13 +65,13 @@ circuit polymail_placeholder_receipt() -> CompilationReceipt
     }
 }
 
-circuit make_polymail_module(
+circuit make_qmail_module(
     name: string,
     partition: u8,
     sla: u8,
     budget: ResourceBudget8D
 ) -> ModuleNode
-    lex polylabs/polymail
+    lex polyqlabs/qmail
     @status production
     @precision C
     observe metrics: [module_name, aperture_partition]
@@ -91,7 +91,7 @@ circuit make_polymail_module(
         required_entitlement: EntitlementTier::Free as u8,
         classification_domains: [],
         max_classification_level: 0,
-        compilation_receipt: polymail_placeholder_receipt(),
+        compilation_receipt: qmail_placeholder_receipt(),
         source_hash: bytes(32, 0x00),
         compiler_version_major: POLYMAIL_VERSION_MAJOR,
         compiler_version_minor: POLYMAIL_VERSION_MINOR,
@@ -112,8 +112,8 @@ circuit make_polymail_module(
     }
 }
 
-circuit make_polymail_requires_edge(source: string, target: string) -> ModuleEdge
-    lex polylabs/polymail
+circuit make_qmail_requires_edge(source: string, target: string) -> ModuleEdge
+    lex polyqlabs/qmail
     @status production
     @precision D
 {
@@ -131,122 +131,122 @@ circuit make_polymail_requires_edge(source: string, target: string) -> ModuleEdg
 // Module Definitions — 13 ModuleNodes
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ── polymail_rich_compose ── Rich text compose with templates ────────────────
+// ── qmail_rich_compose ── Rich text compose with templates ────────────────
 
-circuit polymail_rich_compose_module() -> ModuleNode
-    lex polylabs/polymail  @status production  @precision B
+circuit qmail_rich_compose_module() -> ModuleNode
+    lex polyqlabs/qmail  @status production  @precision B
     observe metrics: [module_init]  meters [compute_cycles]
-{ make_polymail_module("polymail_rich_compose", AperturePartition::Head as u8,
+{ make_qmail_module("qmail_rich_compose", AperturePartition::Head as u8,
     SLATier::Premium as u8, ResourceBudget8D {
         execution: 300000, hash_ops: 4000, bandwidth: 60000, storage: 80000,
         observe_events: 8000, proofs: 100, consensus: 30, memory: 67108864,
     }) }
 
-// ── polymail_smtp_bridge ── SMTP/IMAP protocol bridge ───────────────────────
+// ── qmail_smtp_bridge ── SMTP/IMAP protocol bridge ───────────────────────
 
-circuit polymail_smtp_bridge_module() -> ModuleNode
-    lex polylabs/polymail  @status production  @precision B
+circuit qmail_smtp_bridge_module() -> ModuleNode
+    lex polyqlabs/qmail  @status production  @precision B
     observe metrics: [module_init]  meters [compute_cycles]
-{ make_polymail_module("polymail_smtp_bridge", AperturePartition::Backend as u8,
+{ make_qmail_module("qmail_smtp_bridge", AperturePartition::Backend as u8,
     SLATier::Premium as u8, ResourceBudget8D {
         execution: 500000, hash_ops: 8000, bandwidth: 200000, storage: 100000,
         observe_events: 15000, proofs: 200, consensus: 50, memory: 134217728,
     }) }
 
-// ── polymail_route ── Inbound/outbound routing, alias resolution ────────────
+// ── qmail_route ── Inbound/outbound routing, alias resolution ────────────
 
-circuit polymail_route_module() -> ModuleNode
-    lex polylabs/polymail  @status production  @precision B
+circuit qmail_route_module() -> ModuleNode
+    lex polyqlabs/qmail  @status production  @precision B
     observe metrics: [module_init]  meters [compute_cycles]
-{ make_polymail_module("polymail_route", AperturePartition::Backend as u8,
+{ make_qmail_module("qmail_route", AperturePartition::Backend as u8,
     SLATier::Premium as u8, ResourceBudget8D {
         execution: 200000, hash_ops: 3000, bandwidth: 80000, storage: 60000,
         observe_events: 10000, proofs: 100, consensus: 40, memory: 33554432,
     }) }
 
-// ── polymail_encrypt ── ML-KEM-1024 + ML-DSA-87 envelope encryption ─────────
+// ── qmail_encrypt ── ML-KEM-1024 + ML-DSA-87 envelope encryption ─────────
 
-circuit polymail_encrypt_module() -> ModuleNode
-    lex polylabs/polymail  @status production  @precision B
+circuit qmail_encrypt_module() -> ModuleNode
+    lex polyqlabs/qmail  @status production  @precision B
     observe metrics: [module_init]  meters [compute_cycles]
-{ make_polymail_module("polymail_encrypt", AperturePartition::Backend as u8,
+{ make_qmail_module("qmail_encrypt", AperturePartition::Backend as u8,
     SLATier::Premium as u8, ResourceBudget8D {
         execution: 400000, hash_ops: 12000, bandwidth: 100000, storage: 80000,
         observe_events: 8000, proofs: 300, consensus: 40, memory: 67108864,
     }) }
 
-// ── polymail_classify ── Spam/phishing/ham classification ───────────────────
+// ── qmail_classify ── Spam/phishing/ham classification ───────────────────
 
-circuit polymail_classify_module() -> ModuleNode
-    lex polylabs/polymail  @status production  @precision B
+circuit qmail_classify_module() -> ModuleNode
+    lex polyqlabs/qmail  @status production  @precision B
     observe metrics: [module_init]  meters [compute_cycles]
-{ make_polymail_module("polymail_classify", AperturePartition::Backend as u8,
+{ make_qmail_module("qmail_classify", AperturePartition::Backend as u8,
     SLATier::Standard as u8, ResourceBudget8D {
         execution: 250000, hash_ops: 5000, bandwidth: 40000, storage: 60000,
         observe_events: 12000, proofs: 150, consensus: 30, memory: 33554432,
     }) }
 
-// ── polymail_filter ── User filter rules, label assignment ──────────────────
+// ── qmail_filter ── User filter rules, label assignment ──────────────────
 
-circuit polymail_filter_module() -> ModuleNode
-    lex polylabs/polymail  @status production  @precision B
+circuit qmail_filter_module() -> ModuleNode
+    lex polyqlabs/qmail  @status production  @precision B
     observe metrics: [module_init]  meters [compute_cycles]
-{ make_polymail_module("polymail_filter", AperturePartition::Backend as u8,
+{ make_qmail_module("qmail_filter", AperturePartition::Backend as u8,
     SLATier::Standard as u8, ResourceBudget8D {
         execution: 150000, hash_ops: 2000, bandwidth: 30000, storage: 40000,
         observe_events: 6000, proofs: 50, consensus: 20, memory: 16777216,
     }) }
 
-// ── polymail_search ── Full-text encrypted search ───────────────────────────
+// ── qmail_search ── Full-text encrypted search ───────────────────────────
 
-circuit polymail_search_module() -> ModuleNode
-    lex polylabs/polymail  @status production  @precision B
+circuit qmail_search_module() -> ModuleNode
+    lex polyqlabs/qmail  @status production  @precision B
     observe metrics: [module_init]  meters [compute_cycles]
-{ make_polymail_module("polymail_search", AperturePartition::Backend as u8,
+{ make_qmail_module("qmail_search", AperturePartition::Backend as u8,
     SLATier::Standard as u8, ResourceBudget8D {
         execution: 300000, hash_ops: 6000, bandwidth: 50000, storage: 120000,
         observe_events: 8000, proofs: 100, consensus: 20, memory: 67108864,
     }) }
 
-// ── polymail_calendar ── Meeting invite parsing, iCal extraction ────────────
+// ── qmail_calendar ── Meeting invite parsing, iCal extraction ────────────
 
-circuit polymail_calendar_module() -> ModuleNode
-    lex polylabs/polymail  @status production  @precision B
+circuit qmail_calendar_module() -> ModuleNode
+    lex polyqlabs/qmail  @status production  @precision B
     observe metrics: [module_init]  meters [compute_cycles]
-{ make_polymail_module("polymail_calendar", AperturePartition::Backend as u8,
+{ make_qmail_module("qmail_calendar", AperturePartition::Backend as u8,
     SLATier::Standard as u8, ResourceBudget8D {
         execution: 100000, hash_ops: 1000, bandwidth: 20000, storage: 30000,
         observe_events: 4000, proofs: 30, consensus: 10, memory: 16777216,
     }) }
 
-// ── polymail_rbac ── Per-mailbox RBAC, delegate access ──────────────────────
+// ── qmail_rbac ── Per-mailbox RBAC, delegate access ──────────────────────
 
-circuit polymail_rbac_module() -> ModuleNode
-    lex polylabs/polymail  @status production  @precision B
+circuit qmail_rbac_module() -> ModuleNode
+    lex polyqlabs/qmail  @status production  @precision B
     observe metrics: [module_init]  meters [compute_cycles]
-{ make_polymail_module("polymail_rbac", AperturePartition::Backend as u8,
+{ make_qmail_module("qmail_rbac", AperturePartition::Backend as u8,
     SLATier::Standard as u8, ResourceBudget8D {
         execution: 80000, hash_ops: 2000, bandwidth: 15000, storage: 20000,
         observe_events: 3000, proofs: 50, consensus: 20, memory: 8388608,
     }) }
 
-// ── polymail_metering ── 8D metering aggregation ────────────────────────────
+// ── qmail_metering ── 8D metering aggregation ────────────────────────────
 
-circuit polymail_metering_module() -> ModuleNode
-    lex polylabs/polymail  @status production  @precision B
+circuit qmail_metering_module() -> ModuleNode
+    lex polyqlabs/qmail  @status production  @precision B
     observe metrics: [module_init]  meters [compute_cycles]
-{ make_polymail_module("polymail_metering", AperturePartition::Backend as u8,
+{ make_qmail_module("qmail_metering", AperturePartition::Backend as u8,
     SLATier::Standard as u8, ResourceBudget8D {
         execution: 100000, hash_ops: 1500, bandwidth: 20000, storage: 30000,
         observe_events: 5000, proofs: 40, consensus: 15, memory: 16777216,
     }) }
 
-// ── polymail_platform_health ── Health probes, circuit liveness ─────────────
+// ── qmail_platform_health ── Health probes, circuit liveness ─────────────
 
-circuit polymail_platform_health_module() -> ModuleNode
-    lex polylabs/polymail  @status production  @precision B
+circuit qmail_platform_health_module() -> ModuleNode
+    lex polyqlabs/qmail  @status production  @precision B
     observe metrics: [module_init]  meters [compute_cycles]
-{ make_polymail_module("polymail_platform_health", AperturePartition::Backend as u8,
+{ make_qmail_module("qmail_platform_health", AperturePartition::Backend as u8,
     SLATier::Standard as u8, ResourceBudget8D {
         execution: 50000, hash_ops: 500, bandwidth: 10000, storage: 10000,
         observe_events: 2000, proofs: 20, consensus: 10, memory: 8388608,
@@ -255,9 +255,9 @@ circuit polymail_platform_health_module() -> ModuleNode
 // ── mailbox_graph ── Mailbox/Folder/Label/Contact registry ──────────────────
 
 circuit mailbox_graph_module() -> ModuleNode
-    lex polylabs/polymail  @status production  @precision B
+    lex polyqlabs/qmail  @status production  @precision B
     observe metrics: [module_init]  meters [compute_cycles]
-{ make_polymail_module("mailbox_graph", AperturePartition::Backend as u8,
+{ make_qmail_module("mailbox_graph", AperturePartition::Backend as u8,
     SLATier::Standard as u8, ResourceBudget8D {
         execution: 150000, hash_ops: 4000, bandwidth: 30000, storage: 100000,
         observe_events: 6000, proofs: 80, consensus: 30, memory: 33554432,
@@ -266,9 +266,9 @@ circuit mailbox_graph_module() -> ModuleNode
 // ── thread_dag ── Thread/Message/Reply conversation DAG ─────────────────────
 
 circuit thread_dag_module() -> ModuleNode
-    lex polylabs/polymail  @status production  @precision B
+    lex polyqlabs/qmail  @status production  @precision B
     observe metrics: [module_init]  meters [compute_cycles]
-{ make_polymail_module("thread_dag", AperturePartition::Backend as u8,
+{ make_qmail_module("thread_dag", AperturePartition::Backend as u8,
     SLATier::Standard as u8, ResourceBudget8D {
         execution: 120000, hash_ops: 3000, bandwidth: 25000, storage: 80000,
         observe_events: 5000, proofs: 60, consensus: 25, memory: 33554432,
@@ -278,10 +278,10 @@ circuit thread_dag_module() -> ModuleNode
 // Graph Registration
 // ═══════════════════════════════════════════════════════════════════════════════
 
-circuit polymail_app_graph_register(
+circuit qmail_app_graph_register(
     graph: CsrStorage
 ) -> CsrStorage
-    lex polylabs/polymail
+    lex polyqlabs/qmail
     @status production
     @precision B
     @attested true
@@ -289,62 +289,62 @@ circuit polymail_app_graph_register(
     observe metrics: [registered_module_count, registered_edge_count]
     meters [compute_cycles, memory_bytes]
 {
-    let (g, id_rich_compose)     = module_graph_add_module(graph, polymail_rich_compose_module())
-    let (g, id_smtp_bridge)      = module_graph_add_module(g, polymail_smtp_bridge_module())
-    let (g, id_route)            = module_graph_add_module(g, polymail_route_module())
-    let (g, id_encrypt)          = module_graph_add_module(g, polymail_encrypt_module())
-    let (g, id_classify)         = module_graph_add_module(g, polymail_classify_module())
-    let (g, id_filter)           = module_graph_add_module(g, polymail_filter_module())
-    let (g, id_search)           = module_graph_add_module(g, polymail_search_module())
-    let (g, id_calendar)         = module_graph_add_module(g, polymail_calendar_module())
-    let (g, id_rbac)             = module_graph_add_module(g, polymail_rbac_module())
-    let (g, id_metering)         = module_graph_add_module(g, polymail_metering_module())
-    let (g, id_platform_health)  = module_graph_add_module(g, polymail_platform_health_module())
+    let (g, id_rich_compose)     = module_graph_add_module(graph, qmail_rich_compose_module())
+    let (g, id_smtp_bridge)      = module_graph_add_module(g, qmail_smtp_bridge_module())
+    let (g, id_route)            = module_graph_add_module(g, qmail_route_module())
+    let (g, id_encrypt)          = module_graph_add_module(g, qmail_encrypt_module())
+    let (g, id_classify)         = module_graph_add_module(g, qmail_classify_module())
+    let (g, id_filter)           = module_graph_add_module(g, qmail_filter_module())
+    let (g, id_search)           = module_graph_add_module(g, qmail_search_module())
+    let (g, id_calendar)         = module_graph_add_module(g, qmail_calendar_module())
+    let (g, id_rbac)             = module_graph_add_module(g, qmail_rbac_module())
+    let (g, id_metering)         = module_graph_add_module(g, qmail_metering_module())
+    let (g, id_platform_health)  = module_graph_add_module(g, qmail_platform_health_module())
     let (g, id_mailbox_graph)    = module_graph_add_module(g, mailbox_graph_module())
     let (g, id_thread_dag)       = module_graph_add_module(g, thread_dag_module())
 
     // ── Intra-graph REQUIRES edges ──────────────────────────────────────────
-    // polymail_rich_compose → encrypt, route, mailbox_graph
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_rich_compose", "polymail_encrypt"), id_rich_compose, id_encrypt)
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_rich_compose", "polymail_route"), id_rich_compose, id_route)
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_rich_compose", "mailbox_graph"), id_rich_compose, id_mailbox_graph)
+    // qmail_rich_compose → encrypt, route, mailbox_graph
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_rich_compose", "qmail_encrypt"), id_rich_compose, id_encrypt)
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_rich_compose", "qmail_route"), id_rich_compose, id_route)
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_rich_compose", "mailbox_graph"), id_rich_compose, id_mailbox_graph)
 
-    // polymail_smtp_bridge → route, encrypt
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_smtp_bridge", "polymail_route"), id_smtp_bridge, id_route)
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_smtp_bridge", "polymail_encrypt"), id_smtp_bridge, id_encrypt)
+    // qmail_smtp_bridge → route, encrypt
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_smtp_bridge", "qmail_route"), id_smtp_bridge, id_route)
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_smtp_bridge", "qmail_encrypt"), id_smtp_bridge, id_encrypt)
 
-    // polymail_route → filter, classify, mailbox_graph
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_route", "polymail_filter"), id_route, id_filter)
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_route", "polymail_classify"), id_route, id_classify)
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_route", "mailbox_graph"), id_route, id_mailbox_graph)
+    // qmail_route → filter, classify, mailbox_graph
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_route", "qmail_filter"), id_route, id_filter)
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_route", "qmail_classify"), id_route, id_classify)
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_route", "mailbox_graph"), id_route, id_mailbox_graph)
 
-    // polymail_encrypt → rbac
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_encrypt", "polymail_rbac"), id_encrypt, id_rbac)
+    // qmail_encrypt → rbac
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_encrypt", "qmail_rbac"), id_encrypt, id_rbac)
 
-    // polymail_classify → filter, thread_dag
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_classify", "polymail_filter"), id_classify, id_filter)
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_classify", "thread_dag"), id_classify, id_thread_dag)
+    // qmail_classify → filter, thread_dag
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_classify", "qmail_filter"), id_classify, id_filter)
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_classify", "thread_dag"), id_classify, id_thread_dag)
 
-    // polymail_filter → mailbox_graph
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_filter", "mailbox_graph"), id_filter, id_mailbox_graph)
+    // qmail_filter → mailbox_graph
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_filter", "mailbox_graph"), id_filter, id_mailbox_graph)
 
-    // polymail_search → mailbox_graph, thread_dag
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_search", "mailbox_graph"), id_search, id_mailbox_graph)
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_search", "thread_dag"), id_search, id_thread_dag)
+    // qmail_search → mailbox_graph, thread_dag
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_search", "mailbox_graph"), id_search, id_mailbox_graph)
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_search", "thread_dag"), id_search, id_thread_dag)
 
-    // polymail_calendar → filter, mailbox_graph
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_calendar", "polymail_filter"), id_calendar, id_filter)
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_calendar", "mailbox_graph"), id_calendar, id_mailbox_graph)
+    // qmail_calendar → filter, mailbox_graph
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_calendar", "qmail_filter"), id_calendar, id_filter)
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_calendar", "mailbox_graph"), id_calendar, id_mailbox_graph)
 
-    // polymail_metering → smtp_bridge
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_metering", "polymail_smtp_bridge"), id_metering, id_smtp_bridge)
+    // qmail_metering → smtp_bridge
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_metering", "qmail_smtp_bridge"), id_metering, id_smtp_bridge)
 
-    // polymail_platform_health → metering, smtp_bridge
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_platform_health", "polymail_metering"), id_platform_health, id_metering)
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("polymail_platform_health", "polymail_smtp_bridge"), id_platform_health, id_smtp_bridge)
+    // qmail_platform_health → metering, smtp_bridge
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_platform_health", "qmail_metering"), id_platform_health, id_metering)
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("qmail_platform_health", "qmail_smtp_bridge"), id_platform_health, id_smtp_bridge)
 
     // thread_dag → mailbox_graph
-    let g = module_graph_add_edge(g, make_polymail_requires_edge("thread_dag", "mailbox_graph"), id_thread_dag, id_mailbox_graph)
+    let g = module_graph_add_edge(g, make_qmail_requires_edge("thread_dag", "mailbox_graph"), id_thread_dag, id_mailbox_graph)
 
     g
 }
@@ -353,31 +353,31 @@ circuit polymail_app_graph_register(
 // Cross-Graph Bridge Edges
 // ═══════════════════════════════════════════════════════════════════════════════
 
-circuit polymail_register_bridge_edges(
+circuit qmail_register_bridge_edges(
     graph: CsrStorage
 ) -> CsrStorage
-    lex polylabs/polymail
+    lex polyqlabs/qmail
     @status production
     @precision B
     @attested true
     observe metrics: [bridge_count]
     meters [compute_cycles]
 {
-    let metering_id  = find_poly_module_id(graph, "polymail_metering")
-    let rbac_id      = find_poly_module_id(graph, "polymail_rbac")
-    let encrypt_id   = find_poly_module_id(graph, "polymail_encrypt")
-    let calendar_id  = find_poly_module_id(graph, "polymail_calendar")
+    let metering_id  = find_poly_module_id(graph, "qmail_metering")
+    let rbac_id      = find_poly_module_id(graph, "qmail_rbac")
+    let encrypt_id   = find_poly_module_id(graph, "qmail_encrypt")
+    let calendar_id  = find_poly_module_id(graph, "qmail_calendar")
 
     let g = graph
 
-    // polymail_metering → PolyKit metering aggregation
+    // qmail_metering → QKit metering aggregation
     if metering_id != 0xFFFFFFFF as u32 {
         let bridge = InterAppEdge {
             edge_type: EDGE_BRIDGE_TO,
             source_lex: POLYMAIL_APP_LEX,
-            source_module: "polymail_metering",
-            target_lex: "polykit/metering",
-            target_module: "polykit_metering",
+            source_module: "qmail_metering",
+            target_lex: "qkit/metering",
+            target_module: "qkit_metering",
             bridge_scope: BridgeScope::Platform as u8,
             shared_fields: ["send_volume", "receive_volume", "storage_bytes", "bandwidth_bytes"],
             redacted_fields: [],
@@ -386,14 +386,14 @@ circuit polymail_register_bridge_edges(
         g = module_graph_add_bridge_edge(g, bridge, metering_id)
     }
 
-    // polymail_rbac → PolyKit RBAC role composition
+    // qmail_rbac → QKit RBAC role composition
     if rbac_id != 0xFFFFFFFF as u32 {
         let bridge = InterAppEdge {
             edge_type: EDGE_BRIDGE_TO,
             source_lex: POLYMAIL_APP_LEX,
-            source_module: "polymail_rbac",
-            target_lex: "polykit/rbac",
-            target_module: "polykit_rbac",
+            source_module: "qmail_rbac",
+            target_lex: "qkit/rbac",
+            target_module: "qkit_rbac",
             bridge_scope: BridgeScope::Platform as u8,
             shared_fields: ["role_set", "delegate_permissions", "shared_mailbox_access"],
             redacted_fields: [],
@@ -402,14 +402,14 @@ circuit polymail_register_bridge_edges(
         g = module_graph_add_bridge_edge(g, bridge, rbac_id)
     }
 
-    // polymail_encrypt → PolyKit sanitize (content sanitization)
+    // qmail_encrypt → QKit sanitize (content sanitization)
     if encrypt_id != 0xFFFFFFFF as u32 {
         let bridge = InterAppEdge {
             edge_type: EDGE_BRIDGE_TO,
             source_lex: POLYMAIL_APP_LEX,
-            source_module: "polymail_encrypt",
-            target_lex: "polykit/sanitize",
-            target_module: "polykit_sanitize",
+            source_module: "qmail_encrypt",
+            target_lex: "qkit/sanitize",
+            target_module: "qkit_sanitize",
             bridge_scope: BridgeScope::Platform as u8,
             shared_fields: ["sanitized_body", "attachment_scan_result", "link_rewrite"],
             redacted_fields: [],
@@ -418,14 +418,14 @@ circuit polymail_register_bridge_edges(
         g = module_graph_add_bridge_edge(g, bridge, encrypt_id)
     }
 
-    // polymail_calendar → PolyCalendar scheduling bridge
+    // qmail_calendar → PolyCalendar scheduling bridge
     if calendar_id != 0xFFFFFFFF as u32 {
         let bridge = InterAppEdge {
             edge_type: EDGE_BRIDGE_TO,
             source_lex: POLYMAIL_APP_LEX,
-            source_module: "polymail_calendar",
-            target_lex: "polylabs/polycalendar",
-            target_module: "polycalendar_scheduling",
+            source_module: "qmail_calendar",
+            target_lex: "polyqlabs/qcalendar",
+            target_module: "qcalendar_scheduling",
             bridge_scope: BridgeScope::Product as u8,
             shared_fields: ["ical_event", "meeting_invite", "rsvp_status"],
             redacted_fields: [],
@@ -441,11 +441,11 @@ circuit polymail_register_bridge_edges(
 // Governance Observation Edges
 // ═══════════════════════════════════════════════════════════════════════════════
 
-circuit polymail_register_governance_edges(
+circuit qmail_register_governance_edges(
     graph: CsrStorage,
     governance_lex: string
 ) -> CsrStorage
-    lex polylabs/polymail
+    lex polyqlabs/qmail
     @status production
     @precision B
     @attested true
@@ -453,10 +453,10 @@ circuit polymail_register_governance_edges(
     meters [compute_cycles]
 {
     let module_names = [
-        "polymail_rich_compose", "polymail_smtp_bridge", "polymail_route",
-        "polymail_encrypt", "polymail_classify", "polymail_filter",
-        "polymail_search", "polymail_calendar", "polymail_rbac",
-        "polymail_metering", "polymail_platform_health",
+        "qmail_rich_compose", "qmail_smtp_bridge", "qmail_route",
+        "qmail_encrypt", "qmail_classify", "qmail_filter",
+        "qmail_search", "qmail_calendar", "qmail_rbac",
+        "qmail_metering", "qmail_platform_health",
         "mailbox_graph", "thread_dag",
     ]
     let g = graph
@@ -482,8 +482,8 @@ circuit polymail_register_governance_edges(
 // Metrics Store
 // ═══════════════════════════════════════════════════════════════════════════════
 
-store series polymail_app_graph_metrics
-    lex polylabs/polymail/metrics
+store series qmail_app_graph_metrics
+    lex polyqlabs/qmail/metrics
 {
     operation: string key
     module_count: u32
@@ -507,22 +507,22 @@ extern "rust" {
 test golden "register_all_13_modules" {
     exec {
         let g = graph_create()
-        let g = polymail_app_graph_register(g)
+        let g = qmail_app_graph_register(g)
     }
     assert {
         g.num_nodes == 13
-        find_poly_module_id(g, "polymail_smtp_bridge") != 0xFFFFFFFF
-        find_poly_module_id(g, "polymail_encrypt") != 0xFFFFFFFF
+        find_poly_module_id(g, "qmail_smtp_bridge") != 0xFFFFFFFF
+        find_poly_module_id(g, "qmail_encrypt") != 0xFFFFFFFF
         find_poly_module_id(g, "thread_dag") != 0xFFFFFFFF
     }
 }
 
-test golden "bridge_edges_to_polykit" {
+test golden "bridge_edges_to_qkit" {
     exec {
         let g = graph_create()
-        let g = polymail_app_graph_register(g)
+        let g = qmail_app_graph_register(g)
         let before_nodes = g.num_nodes
-        let g = polymail_register_bridge_edges(g)
+        let g = qmail_register_bridge_edges(g)
     }
     assert {
         g.num_nodes > before_nodes
@@ -532,9 +532,9 @@ test golden "bridge_edges_to_polykit" {
 test golden "governance_edges_all_modules" {
     exec {
         let g = graph_create()
-        let g = polymail_app_graph_register(g)
+        let g = qmail_app_graph_register(g)
         let before_edges = g.num_edges
-        let g = polymail_register_governance_edges(g, "polylabs/governance")
+        let g = qmail_register_governance_edges(g, "polyqlabs/governance")
     }
     assert {
         g.num_edges >= before_edges + 13

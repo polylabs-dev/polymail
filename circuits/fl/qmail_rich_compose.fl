@@ -1,20 +1,20 @@
-// Poly Mail Rich Compose — Rich email composition using studio document editor
+// Q Mail Rich Compose — Rich email composition using studio document editor
 //
 // Lex Architecture:
-//   esn/global/org/polylabs/mail/compose
-//   Composes polykit_studio_document to provide WYSIWYG HTML email authoring.
+//   esn/global/org/polyqlabs/mail/compose
+//   Composes qkit_studio_document to provide WYSIWYG HTML email authoring.
 //   Attachments can be previewed inline using the document engine (PDF, DOCX,
 //   PPTX rendered to thumbnail + text extract). Final HTML is sanitized, then
-//   encrypted via polymail_encrypt before relay.
+//   encrypted via qmail_encrypt before relay.
 //
 // Flow:
 //   compose_rich_email   → open studio editor in email mode → produce HTML draft
 //   preview_attachment   → decrypt attachment → render preview via document engine
 //   inline_document_view → render attachment inline within compose surface
 
-import polykit_studio_document
-import polymail_encrypt
-import polymail_metering
+import qkit_studio_document
+import qmail_encrypt
+import qmail_metering
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -48,7 +48,7 @@ data RichEmailDraft : mail v1 {
     updated_at: u64,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/compose
+    govern lex esn/global/org/polyqlabs/mail/compose
     cortex {
         obfuscate [sender_id]
         infer on_write
@@ -66,7 +66,7 @@ data EmailAttachmentPreview : mail v1 {
     rendered_at: u64,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/compose
+    govern lex esn/global/org/polyqlabs/mail/compose
     cortex {
         infer on_write
         on_anomaly alert "mail-team"
@@ -81,7 +81,7 @@ data InlineDocumentView : mail v1 {
     rendered_at: u64,
 }
     store kv
-    govern lex esn/global/org/polylabs/mail/compose
+    govern lex esn/global/org/polyqlabs/mail/compose
     cortex {
         infer on_write
         on_anomaly alert "mail-team"
@@ -105,7 +105,7 @@ circuit compose_rich_email(
     format: ComposeFormat,
 ) -> RichEmailDraft
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/compose
+    lex esn/global/org/polyqlabs/mail/compose
     precision C
     observe metrics: [drafts_created, compose_latency_ms, format_distribution]
     monitor "compose_latency" { compose_latency_ms < 200 }
@@ -126,14 +126,14 @@ circuit compose_rich_email(
 
     let (html_body, plain_body) = match format {
         ComposeFormat::RichHtml => {
-            let html = polykit_studio_document::render_html_email(initial_body)
-            let sanitized = polykit_studio_document::sanitize_html(html)
-            let plain = polykit_studio_document::html_to_plaintext(sanitized)
+            let html = qkit_studio_document::render_html_email(initial_body)
+            let sanitized = qkit_studio_document::sanitize_html(html)
+            let plain = qkit_studio_document::html_to_plaintext(sanitized)
             (sanitized, plain)
         },
         ComposeFormat::Markdown => {
-            let html = polykit_studio_document::markdown_to_html(initial_body)
-            let plain = polykit_studio_document::html_to_plaintext(html)
+            let html = qkit_studio_document::markdown_to_html(initial_body)
+            let plain = qkit_studio_document::html_to_plaintext(html)
             (html, plain)
         },
         ComposeFormat::PlainText => {
@@ -157,7 +157,7 @@ circuit compose_rich_email(
     eslite_insert("drafts", draft_id, draft)
     emit(compose_events, draft)
 
-    polymail_metering::record_usage(sender_id, "mail_compose", DimensionValues {
+    qmail_metering::record_usage(sender_id, "mail_compose", DimensionValues {
         executions: 1, hashes: 3, bandwidth: 0,
         storage: len(html_body) + len(plain_body), observables: 2, proofs: 0, circuits: 1, mpc_sessions: 0,
     })
@@ -175,7 +175,7 @@ circuit preview_attachment(
     format: AttachmentFormat,
 ) -> EmailAttachmentPreview
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/compose
+    lex esn/global/org/polyqlabs/mail/compose
     precision C
     observe metrics: [attachment_previews, preview_render_ms, attachment_formats]
     monitor "attachment_preview_latency" { preview_render_ms < 1000 }
@@ -187,7 +187,7 @@ circuit preview_attachment(
 {
     let ts = now()
     let content = aes_gcm_decrypt(decryption_key, encrypted_data)
-    let render = polykit_studio_document::render_preview(content, format)
+    let render = qkit_studio_document::render_preview(content, format)
     let att_seed = concat(draft_id, encode(filename), csprng(16))
     let attachment_id = bit_slice(sha3_256(att_seed), 0, 128)
 
@@ -204,7 +204,7 @@ circuit preview_attachment(
 
     emit(attachment_preview_events, preview)
 
-    polymail_metering::record_usage(user_id, "mail_attachment_preview", DimensionValues {
+    qmail_metering::record_usage(user_id, "mail_attachment_preview", DimensionValues {
         executions: 1, hashes: 2, bandwidth: len(content),
         storage: 0, observables: 1, proofs: 0, circuits: 1, mpc_sessions: 0,
     })
@@ -221,7 +221,7 @@ circuit inline_document_view(
     page_end: u32,
 ) -> InlineDocumentView
     profile poly_framework_standard
-    lex esn/global/org/polylabs/mail/compose
+    lex esn/global/org/polyqlabs/mail/compose
     precision C
     observe metrics: [inline_views, inline_render_ms, inline_pages]
     monitor "inline_render_latency" { inline_render_ms < 800 }
@@ -235,7 +235,7 @@ circuit inline_document_view(
 {
     let ts = now()
     let content = aes_gcm_decrypt(decryption_key, encrypted_data)
-    let rendered_html = polykit_studio_document::render_page_range(content, format, page_start, page_end)
+    let rendered_html = qkit_studio_document::render_page_range(content, format, page_start, page_end)
     let view_seed = concat(attachment_id, encode_u32(page_start), csprng(16))
     let view_id = bit_slice(sha3_256(view_seed), 0, 128)
 

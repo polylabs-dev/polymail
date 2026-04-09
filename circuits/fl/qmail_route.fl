@@ -1,4 +1,4 @@
-// Poly Mail Route — Email routing through distribute-CAS with MX gateway (v0.12.0)
+// Q Mail Route — Email routing through distribute-CAS with MX gateway (v0.12.0)
 //
 // Internal (Poly-to-Poly): Direct distribute-CAS delivery. Email is
 // already ML-KEM-1024 encrypted; distribute into k-of-n erasure shards
@@ -8,8 +8,8 @@
 // re-encrypt with TLS, DKIM-sign, deliver via SMTP. Plaintext
 // exists only in gateway enclave memory, never persisted.
 
-import polykit_identity
-import polykit_metering
+import qkit_identity
+import qkit_metering
 
 type MailboxAddress = struct {
     local_part: bytes(64),
@@ -36,7 +36,7 @@ data DeliveryStatus : mail v1 {
     error_code: u16,
 }
     store kv
-    govern lex global/org/polylabs/mail/route
+    govern lex global/org/polyqlabs/mail/route
     cortex {
         obfuscate [email_id]
         infer on_write
@@ -65,7 +65,7 @@ circuit route_outbound(
     scatter_config_n: u8,
 ) -> [DeliveryStatus]
     profile poly_framework_standard
-    lex global/org/polylabs/mail/route
+    lex global/org/polyqlabs/mail/route
     @precision C
     @observe metrics: [outbound_routed, scatter_deliveries, mx_deliveries, routing_failures]
     monitor "routing_latency" { routing_latency_ms < 500 }
@@ -113,7 +113,7 @@ circuit route_inbound(
     source_is_poly: bool,
 ) -> DeliveryStatus
     profile poly_framework_standard
-    lex global/org/polylabs/mail/route
+    lex global/org/polyqlabs/mail/route
     @precision C
     @observe metrics: [inbound_routed, inbound_scatter, inbound_mx]
     meters [compute_cycles, bandwidth]
@@ -140,7 +140,7 @@ circuit route_inbound(
 // --- Resolve MX records for a domain ---
 circuit resolve_mx(domain: bytes(253)) -> MxRecord
     profile poly_framework_standard
-    lex global/org/polylabs/mail/route
+    lex global/org/polyqlabs/mail/route
     @precision C
     @observe metrics: [mx_lookups, mx_failures, pq_tls_capable]
     monitor "mx_resolution_time" { mx_resolve_ms < 2000 }
@@ -156,10 +156,10 @@ circuit resolve_mx(domain: bytes(253)) -> MxRecord
     }
 }
 
-// --- Deliver an email to a local Poly Mail mailbox ---
+// --- Deliver an email to a local Q Mail mailbox ---
 circuit deliver_local(recipient: MailboxAddress, email_hash: bytes(32)) -> DeliveryStatus
     profile poly_framework_standard
-    lex global/org/polylabs/mail/route
+    lex global/org/polyqlabs/mail/route
     @precision C
     @observe metrics: [local_deliveries]
     wasm_abi [eslite_insert, now]
@@ -185,7 +185,7 @@ circuit deliver_remote(
     mx: MxRecord,
 ) -> DeliveryStatus
     profile poly_framework_sensitive
-    lex global/org/polylabs/mail/route
+    lex global/org/polyqlabs/mail/route
     @precision C
     @observe metrics: [remote_deliveries, remote_failures, tls_upgrades]
     monitor "remote_delivery_time" { delivery_ms < 10000 }
@@ -220,13 +220,13 @@ test golden "route_poly_to_poly" {
     input {
         sender: MailboxAddress {
             local_part: bytes("alice"),
-            domain: bytes("polylabs.dev"),
+            domain: bytes("polyqlabs.dev"),
             user_id: bytes(16, 0xAA),
             is_poly_recipient: true,
         }
         recipients: [MailboxAddress {
             local_part: bytes("bob"),
-            domain: bytes("polylabs.dev"),
+            domain: bytes("polyqlabs.dev"),
             user_id: bytes(16, 0xBB),
             is_poly_recipient: true,
         }]
@@ -246,7 +246,7 @@ test golden "route_poly_to_external" {
     input {
         sender: MailboxAddress {
             local_part: bytes("alice"),
-            domain: bytes("polylabs.dev"),
+            domain: bytes("polyqlabs.dev"),
             user_id: bytes(16, 0xAA),
             is_poly_recipient: true,
         }

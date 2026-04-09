@@ -2,15 +2,15 @@
 /// PolyMail CE Meaning Domains — 3 meaning domains, 1 noise filter,
 /// 2 SME panels for PQ-encrypted email cognitive integration.
 ///
-/// Epic: polymail#TBD (CE + App Graph Integration)
-/// govern lex polylabs/polymail/cognitive
+/// Epic: qmail#TBD (CE + App Graph Integration)
+/// govern lex polyqlabs/qmail/cognitive
 
-lex polylabs/polymail/cognitive
+lex polyqlabs/qmail/cognitive
 
 @target software
 @codegen_targets ["wasm", "rust"]
 
-import "polykit/circuits/fl/polykit_cognitive.fl" {
+import "qkit/circuits/fl/qkit_cognitive.fl" {
     ProductMeaningDomain, MeaningIngestion, DomainId, MeaningId,
     ObservationHash, NoiseFilterId, SmePanelId,
     register_meaning_domain,
@@ -24,53 +24,53 @@ type ProductivitySignal = bytes(64)
 
 // ── Domain Data ─────────────────────────────────────────────────────────────────
 
-data EmailDeliveryPatternsDomain : polylabs/polymail/cognitive v1 {
+data EmailDeliveryPatternsDomain : polyqlabs/qmail/cognitive v1 {
     domain_id: DomainId, bounce_rate_window_ms: u64,
     bounce_rate_ceiling_bps: u16, delivery_latency_p99_ms: u32,
     mx_resolution_failure_threshold: u16, tls_downgrade_alert_threshold: u8,
-}   store kv  govern lex polylabs/polymail/cognitive
+}   store kv  govern lex polyqlabs/qmail/cognitive
     cortex { infer on_write; on_anomaly alert "mail-ops" }
 
-data EmailThreatDetectionDomain : polylabs/polymail/cognitive v1 {
+data EmailThreatDetectionDomain : polyqlabs/qmail/cognitive v1 {
     domain_id: DomainId, phishing_confidence_threshold: u8,
     spam_campaign_window_ms: u64, encryption_downgrade_alert: bool,
     sender_reputation_decay_days: u16, dmarc_failure_escalate: bool,
-}   store kv  govern lex polylabs/polymail/cognitive
+}   store kv  govern lex polyqlabs/qmail/cognitive
     cortex { infer on_write; on_anomaly alert "security-team" }
 
-data EmailProductivityDomain : polylabs/polymail/cognitive v1 {
+data EmailProductivityDomain : polyqlabs/qmail/cognitive v1 {
     domain_id: DomainId, response_time_window_ms: u64,
     response_time_p95_ceiling_ms: u32, thread_depth_alert_threshold: u16,
     unread_accumulation_threshold: u32, peak_hour_analysis_enabled: bool,
-}   store kv  govern lex polylabs/polymail/cognitive
+}   store kv  govern lex polyqlabs/qmail/cognitive
     cortex { infer on_write; on_anomaly alert "user-insights" }
 
 // ── Noise Filter ────────────────────────────────────────────────────────────────
 
-data PolyMailNoiseFilterConfig : polylabs/polymail/cognitive v1 {
+data PolyMailNoiseFilterConfig : polyqlabs/qmail/cognitive v1 {
     filter_id: NoiseFilterId, suppress_newsletter_noise: bool,
     suppress_auto_replies: bool, signal_delivery_failures: bool,
     signal_encryption_downgrades: bool,
     newsletter_indicators: list<bytes(64)>,
     auto_reply_patterns: list<bytes(64)>,
     min_signal_confidence: u8, dedup_window_ms: u64,
-}   store kv  govern lex polylabs/polymail/cognitive
+}   store kv  govern lex polyqlabs/qmail/cognitive
     cortex { infer on_write }
 
 // ── SME Panels ──────────────────────────────────────────────────────────────────
 
-data SmtpBridgeReliabilityPanel : polylabs/polymail/cognitive v1 {
+data SmtpBridgeReliabilityPanel : polyqlabs/qmail/cognitive v1 {
     panel_id: SmePanelId, domain_scope: bytes(64), min_panelists: u8,
     specializations: list<bytes(32)>, calibration_accuracy_floor_bps: u16,
     review_timeout_ms: u64,
-}   store kv  govern lex polylabs/polymail/cognitive
+}   store kv  govern lex polyqlabs/qmail/cognitive
     cortex { infer on_write; on_anomaly alert "mail-ops" }
 
-data ThreatModelEvolutionPanel : polylabs/polymail/cognitive v1 {
+data ThreatModelEvolutionPanel : polyqlabs/qmail/cognitive v1 {
     panel_id: SmePanelId, domain_scope: bytes(64), min_panelists: u8,
     specializations: list<bytes(32)>, calibration_accuracy_floor_bps: u16,
     review_timeout_ms: u64,
-}   store kv  govern lex polylabs/polymail/cognitive
+}   store kv  govern lex polyqlabs/qmail/cognitive
     cortex { infer on_write; on_anomaly alert "security-team" }
 
 // ── Streams & Series ────────────────────────────────────────────────────────────
@@ -79,7 +79,7 @@ stream delivery_pattern_obs  : event<MeaningIngestion> { retention 90d;  consume
 stream threat_detection_obs  : event<MeaningIngestion> { retention 365d; consumers [streamsight, cortex, audit_trail] }
 stream productivity_obs      : event<MeaningIngestion> { retention 90d;  consumers [streamsight, cortex] }
 
-series polymail_cognitive_series {
+series qmail_cognitive_series {
     over EmailDeliveryPatternsDomain,
     fields: [bounce_rate, delivery_latency, mx_failures,
              phishing_detected, spam_campaigns, response_times]
@@ -94,7 +94,7 @@ extern {
 // ── Domain Registration Circuits ────────────────────────────────────────────────
 
 circuit register_email_delivery_patterns_domain() -> ProductMeaningDomain
-    profile poly_framework_standard  lex polylabs/polymail/cognitive  precision B
+    profile poly_framework_standard  lex polyqlabs/qmail/cognitive  precision B
     rbac [admin, operator]  observe metrics: [domains_registered]
     meters [compute_cycles, memory_bytes, storage]
     wasm_abi [store_get, store_put, emit, now]
@@ -103,11 +103,11 @@ circuit register_email_delivery_patterns_domain() -> ProductMeaningDomain
         assert len(r.domain_id) == 32
         assert r.crystallization_threshold == 70
     }
-{ register_meaning_domain(bytes(128, "polylabs/polymail"), bytes(64, "email/delivery_patterns"),
+{ register_meaning_domain(bytes(128, "polyqlabs/qmail"), bytes(64, "email/delivery_patterns"),
     bytes(256, "Bounce rate trends, delivery latency, MX resolution failures, TLS downgrade frequency"), 70, 85) }
 
 circuit register_email_threat_detection_domain() -> ProductMeaningDomain
-    profile poly_framework_standard  lex polylabs/polymail/cognitive  precision B
+    profile poly_framework_standard  lex polyqlabs/qmail/cognitive  precision B
     rbac [admin, operator]  observe metrics: [domains_registered]
     meters [compute_cycles, memory_bytes, storage]
     wasm_abi [store_get, store_put, emit, now]
@@ -116,11 +116,11 @@ circuit register_email_threat_detection_domain() -> ProductMeaningDomain
         assert len(r.domain_id) == 32
         assert r.crystallization_threshold == 80
     }
-{ register_meaning_domain(bytes(128, "polylabs/polymail"), bytes(64, "email/threat_detection"),
+{ register_meaning_domain(bytes(128, "polyqlabs/qmail"), bytes(64, "email/threat_detection"),
     bytes(256, "Phishing pattern evolution, spam campaign detection, encryption downgrade attacks"), 80, 95) }
 
 circuit register_email_productivity_domain() -> ProductMeaningDomain
-    profile poly_framework_standard  lex polylabs/polymail/cognitive  precision B
+    profile poly_framework_standard  lex polyqlabs/qmail/cognitive  precision B
     rbac [admin, operator]  observe metrics: [domains_registered]
     meters [compute_cycles, memory_bytes, storage]
     wasm_abi [store_get, store_put, emit, now]
@@ -129,24 +129,24 @@ circuit register_email_productivity_domain() -> ProductMeaningDomain
         assert len(r.domain_id) == 32
         assert r.crystallization_threshold == 65
     }
-{ register_meaning_domain(bytes(128, "polylabs/polymail"), bytes(64, "email/productivity"),
+{ register_meaning_domain(bytes(128, "polyqlabs/qmail"), bytes(64, "email/productivity"),
     bytes(256, "Response time distribution, thread depth patterns, unread accumulation"), 65, 70) }
 
 // ── Noise Filter Setup ──────────────────────────────────────────────────────────
 
-circuit configure_polymail_noise_filter() -> PolyMailNoiseFilterConfig
-    profile poly_framework_standard  lex polylabs/polymail/cognitive  precision B
+circuit configure_qmail_noise_filter() -> PolyMailNoiseFilterConfig
+    profile poly_framework_standard  lex polyqlabs/qmail/cognitive  precision B
     rbac [admin]  observe metrics: [noise_filters_configured]
     meters [compute_cycles, storage]  wasm_abi [store_get, store_put, emit, now]
     test golden "configure_noise_filter" {
-        let r = configure_polymail_noise_filter()
+        let r = configure_qmail_noise_filter()
         assert r.suppress_newsletter_noise == true
         assert r.suppress_auto_replies == true
         assert r.signal_delivery_failures == true
         assert r.min_signal_confidence == 55
     }
 {
-    let fid = sha3_256(bytes(32, "polylabs/noise/polymail"))
+    let fid = sha3_256(bytes(32, "polyqlabs/noise/qmail"))
     let cfg = PolyMailNoiseFilterConfig {
         filter_id: fid, suppress_newsletter_noise: true,
         suppress_auto_replies: true, signal_delivery_failures: true,
@@ -162,7 +162,7 @@ circuit configure_polymail_noise_filter() -> PolyMailNoiseFilterConfig
 // ── SME Panel Setup ─────────────────────────────────────────────────────────────
 
 circuit configure_smtp_bridge_reliability_panel() -> SmtpBridgeReliabilityPanel
-    profile poly_framework_standard  lex polylabs/polymail/cognitive  precision B
+    profile poly_framework_standard  lex polyqlabs/qmail/cognitive  precision B
     rbac [admin]  observe metrics: [sme_panels_configured]
     meters [compute_cycles, storage]  wasm_abi [store_get, store_put, emit, now]
     test golden "configure_smtp_panel" {
@@ -171,7 +171,7 @@ circuit configure_smtp_bridge_reliability_panel() -> SmtpBridgeReliabilityPanel
         assert r.calibration_accuracy_floor_bps >= 7000
     }
 {
-    let pid = sha3_256(bytes(32, "polylabs/sme/smtp_bridge"))
+    let pid = sha3_256(bytes(32, "polyqlabs/sme/smtp_bridge"))
     let p = SmtpBridgeReliabilityPanel {
         panel_id: pid, domain_scope: bytes(64, "email/delivery_patterns"), min_panelists: 3,
         specializations: [bytes(32, "smtp_protocol"), bytes(32, "mx_resolution"),
@@ -183,7 +183,7 @@ circuit configure_smtp_bridge_reliability_panel() -> SmtpBridgeReliabilityPanel
 }
 
 circuit configure_threat_model_evolution_panel() -> ThreatModelEvolutionPanel
-    profile poly_framework_standard  lex polylabs/polymail/cognitive  precision B
+    profile poly_framework_standard  lex polyqlabs/qmail/cognitive  precision B
     rbac [admin]  observe metrics: [sme_panels_configured]
     meters [compute_cycles, storage]  wasm_abi [store_get, store_put, emit, now]
     test golden "configure_threat_panel" {
@@ -192,7 +192,7 @@ circuit configure_threat_model_evolution_panel() -> ThreatModelEvolutionPanel
         assert r.calibration_accuracy_floor_bps >= 7000
     }
 {
-    let pid = sha3_256(bytes(32, "polylabs/sme/threat_model"))
+    let pid = sha3_256(bytes(32, "polyqlabs/sme/threat_model"))
     let p = ThreatModelEvolutionPanel {
         panel_id: pid, domain_scope: bytes(64, "email/threat_detection"), min_panelists: 3,
         specializations: [bytes(32, "phishing_detection"), bytes(32, "spam_evolution"),
@@ -205,8 +205,8 @@ circuit configure_threat_model_evolution_panel() -> ThreatModelEvolutionPanel
 
 // ── Registration Orchestrator ───────────────────────────────────────────────────
 
-circuit polymail_register_ce(product_lex: string) -> bool
-    profile poly_framework_standard  lex polylabs/polymail/cognitive  precision B
+circuit qmail_register_ce(product_lex: string) -> bool
+    profile poly_framework_standard  lex polyqlabs/qmail/cognitive  precision B
     rbac [admin]  observe metrics: [ce_registration_complete]
     meters [compute_cycles, memory_bytes, storage]
     wasm_abi [store_get, store_put, emit, now]
@@ -214,7 +214,7 @@ circuit polymail_register_ce(product_lex: string) -> bool
     let d1 = register_email_delivery_patterns_domain()
     let d2 = register_email_threat_detection_domain()
     let d3 = register_email_productivity_domain()
-    let nf = configure_polymail_noise_filter()
+    let nf = configure_qmail_noise_filter()
     let p1 = configure_smtp_bridge_reliability_panel()
     let p2 = configure_threat_model_evolution_panel()
 
@@ -227,7 +227,7 @@ circuit polymail_register_ce(product_lex: string) -> bool
 
 test golden "full_ce_pipeline_setup" {
     exec {
-        let ok = polymail_register_ce("polylabs/polymail")
+        let ok = qmail_register_ce("polyqlabs/qmail")
     }
     assert {
         ok == true

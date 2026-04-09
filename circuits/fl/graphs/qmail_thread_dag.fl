@@ -1,6 +1,6 @@
-/// Poly Mail Thread DAG — dag email_thread (v0.12.0)
+/// Q Mail Thread DAG — dag email_thread (v0.12.0)
 /// Stratum DAG storage + Cortex AI governance
-/// govern lex global/org/polylabs/mail
+/// govern lex global/org/polyqlabs/mail
 ///
 /// Emails form a DAG within each conversation thread. Replies create
 /// parent edges, forwards branch. Enables threading, ordering, and
@@ -10,9 +10,9 @@
 ///         suggestion store for inbox intelligence
 /// DAG: acyclic enforcement, ML-DSA-87 signing, merkle CSR, PoVC attestation
 
-import polykit_identity
-import polykit_metering
-import polymail_encrypt
+import qkit_identity
+import qkit_metering
+import qmail_encrypt
 
 // ── Enums ───────────────────────────────────────────────────────
 
@@ -48,7 +48,7 @@ data EmailNode : mail v1 {
     pq_signature: bytes(4627),
 }
     store dag
-    govern lex global/org/polylabs/mail
+    govern lex global/org/polyqlabs/mail
     cortex {
         redact [content_hash, subject_preview]
         obfuscate [sender_id, recipient_ids]
@@ -168,7 +168,7 @@ circuit compose_draft(
     thread_id: bytes(16),
     in_reply_to: bytes(16),
 ) -> EmailNode
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -231,7 +231,7 @@ circuit send_email(
     body: bytes,
     recipient_bundles: list<RecipientKeyBundle>,
 ) -> EncryptedEmail
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision A
     @attested true
@@ -283,7 +283,7 @@ circuit receive_email(
     recipient_id: bytes(16),
     thread_id: bytes(16),
 ) -> EmailNode
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision A
     @attested true
@@ -351,7 +351,7 @@ circuit mark_read(
     email_id: bytes(16),
     mailbox_id: bytes(16),
 ) -> bool
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -372,7 +372,7 @@ circuit star_email(
     email_id: bytes(16),
     starred: bool,
 ) -> bool
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -388,7 +388,7 @@ circuit set_label_mask(
     email_id: bytes(16),
     mask: u64,
 ) -> bool
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -406,7 +406,7 @@ circuit archive_email(
     email_id: bytes(16),
     mailbox_id: bytes(16),
 ) -> bool
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -424,7 +424,7 @@ circuit delete_email(
     mailbox_id: bytes(16),
     permanent: bool,
 ) -> bool
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -449,7 +449,7 @@ circuit move_to_spam(
     verdict: u8,
     confidence: f32,
 ) -> bool
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -469,7 +469,7 @@ circuit mark_not_spam(
     email_id: bytes(16),
     mailbox_id: bytes(16),
 ) -> bool
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -493,7 +493,7 @@ circuit forward_email(
     recipients: list<bytes(16)>,
     note_hash: bytes(32),
 ) -> EmailNode
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -535,7 +535,7 @@ circuit get_thread(
     graph_id: bytes(32),
     thread_id: bytes(16),
 ) -> list<EmailNode>
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision B
     @observe metrics: [thread_lookups, thread_depth, thread_node_count]
@@ -548,7 +548,7 @@ circuit get_thread_participants(
     graph_id: bytes(32),
     thread_id: bytes(16),
 ) -> list<bytes(16)>
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision B
     @observe metrics: [participant_lookups, participant_count]
@@ -571,7 +571,7 @@ circuit get_cortex_suggestions(
     mailbox_id: bytes(16),
     limit: u32,
 ) -> list<CortexSuggestion>
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision B
     @observe metrics: [suggestion_reads, suggestion_types]
@@ -584,7 +584,7 @@ circuit apply_cortex_suggestion(
     suggestion_id: bytes(16),
     accepted: bool,
 ) -> bool
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision C
     @attested true
@@ -604,7 +604,7 @@ circuit snapshot_thread(
     graph_id: bytes(32),
     thread_id: bytes(16),
 ) -> bytes(32)
-    lex global/org/polylabs/mail
+    lex global/org/polyqlabs/mail
     @status production
     @precision B
     @attested true

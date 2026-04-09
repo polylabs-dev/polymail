@@ -1,4 +1,4 @@
-// Poly Mail Search — Encrypted search index, on-device only (v0.12.0)
+// Q Mail Search — Encrypted search index, on-device only (v0.12.0)
 //
 // All search operations execute client-side in WASM. The search index is
 // built and stored locally using ESLite. No search queries, index data,
@@ -14,8 +14,8 @@
 // This ensures the search index is opaque even if the device storage
 // is compromised without the user's key material.
 
-import polykit_identity
-import polykit_metering
+import qkit_identity
+import qkit_metering
 
 data SearchIndex : mail v1 {
     index_id: bytes(16),
@@ -25,7 +25,7 @@ data SearchIndex : mail v1 {
     index_version: u32,
 }
     store kv
-    govern lex global/org/polylabs/mail/search
+    govern lex global/org/polyqlabs/mail/search
     cortex {
         obfuscate [mailbox_id]
         infer on_write
@@ -40,7 +40,7 @@ data SearchToken : mail v1 {
     indexed_at: u64,
 }
     store kv
-    govern lex global/org/polylabs/mail/search
+    govern lex global/org/polyqlabs/mail/search
     cortex {
         obfuscate [blinded_token, email_id]
         infer on_write
@@ -87,7 +87,7 @@ circuit index_email(
     user_search_key: bytes(32),
 ) -> u32
     profile poly_framework_sensitive
-    lex global/org/polylabs/mail/search
+    lex global/org/polyqlabs/mail/search
     @precision C
     constant_time true
     @observe metrics: [emails_indexed, tokens_indexed, index_latency_ms]
@@ -172,7 +172,7 @@ circuit search_mailbox(
     date_to: u64,
 ) -> SearchResultSet
     profile poly_framework_standard
-    lex global/org/polylabs/mail/search
+    lex global/org/polyqlabs/mail/search
     @precision C
     @observe metrics: [searches_executed, search_latency_ms, results_returned, zero_result_queries]
     monitor "search_latency" { search_latency_ms < 200 }
@@ -234,7 +234,7 @@ circuit deindex_email(
     email_id: bytes(16),
 ) -> bool
     profile poly_framework_standard
-    lex global/org/polylabs/mail/search
+    lex global/org/polyqlabs/mail/search
     @precision C
     @observe metrics: [emails_deindexed, tokens_removed]
     meters [compute_cycles]
@@ -257,7 +257,7 @@ circuit rebuild_index(
     user_search_key: bytes(32),
 ) -> SearchIndex
     profile poly_framework_standard
-    lex global/org/polylabs/mail/search
+    lex global/org/polyqlabs/mail/search
     @precision C
     @observe metrics: [index_rebuilds, rebuild_latency_ms]
     monitor "rebuild_latency" { rebuild_latency_ms < 30000 }
@@ -295,8 +295,8 @@ test golden "index_and_search_roundtrip" {
         email_id: bytes(16, 0xBB)
         subject: bytes("Meeting tomorrow at 3pm")
         body: bytes("Hi team, let's meet tomorrow at 3pm in the conference room.")
-        from_addr: bytes("alice@polylabs.dev")
-        to_addrs: [bytes("bob@polylabs.dev")]
+        from_addr: bytes("alice@polyqlabs.dev")
+        to_addrs: [bytes("bob@polyqlabs.dev")]
         user_search_key: bytes(32, 0xCC)
     }
     assert {

@@ -3,7 +3,7 @@ version = "0.22.0"
 min_version = "0.22.0"
 
 [component]
-name = "polymail"
+name = "qmail"
 version = "0.2.0"
 description = "PQ encrypted email with scatter-stored mailbox, SMTP bridge, and ESLM classification"
 

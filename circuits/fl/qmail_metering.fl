@@ -1,14 +1,14 @@
-// Poly Mail Metering — Email operation metering (v0.12.0)
+// Q Mail Metering — Email operation metering (v0.12.0)
 //
-// Maps each Poly Mail operation to PolyKit metering dimensions:
+// Maps each Q Mail operation to QKit metering dimensions:
 //   send    [Bandwidth, Observables, Executions]
 //   receive [Bandwidth, Observables, Storage]
 //   attach  [Bandwidth, Storage]
 //   search  [Executions, Observables]
 //
-// Tier enforcement via polykit_metering check_limits.
+// Tier enforcement via qkit_metering check_limits.
 
-import polykit_metering
+import qkit_metering
 
 data MailTier : mail v1 {
     tier_name: string,
@@ -18,7 +18,7 @@ data MailTier : mail v1 {
     custom_domains: u8,
 }
     store kv
-    govern lex global/org/polylabs/mail/metering
+    govern lex global/org/polyqlabs/mail/metering
     cortex {
         infer on_write
         on_anomaly alert "mail-team"
@@ -41,7 +41,7 @@ data MailUsageSummary : mail v1 {
     period_start_ms: u64,
 }
     store kv
-    govern lex global/org/polylabs/mail/metering
+    govern lex global/org/polyqlabs/mail/metering
     cortex {
         obfuscate [user_id]
         infer on_write
@@ -51,7 +51,7 @@ data MailUsageSummary : mail v1 {
 // --- Meter an email send operation ---
 circuit meter_send(user_id: bytes(16), body_size: u64, recipient_count: u8) -> MeteringRecord
     profile poly_framework_standard
-    lex global/org/polylabs/mail/metering
+    lex global/org/polyqlabs/mail/metering
     @precision C
     @observe metrics: [sends_metered, send_bandwidth_bytes]
     meters [compute_cycles]
@@ -73,7 +73,7 @@ circuit meter_send(user_id: bytes(16), body_size: u64, recipient_count: u8) -> M
 // --- Meter an email receive operation ---
 circuit meter_receive(user_id: bytes(16), body_size: u64, stored: bool) -> MeteringRecord
     profile poly_framework_standard
-    lex global/org/polylabs/mail/metering
+    lex global/org/polyqlabs/mail/metering
     @precision C
     @observe metrics: [receives_metered, receive_bandwidth_bytes]
     meters [compute_cycles]
@@ -95,7 +95,7 @@ circuit meter_receive(user_id: bytes(16), body_size: u64, stored: bool) -> Meter
 // --- Meter an attachment upload/download ---
 circuit meter_attachment(user_id: bytes(16), attachment_size: u64, is_upload: bool) -> MeteringRecord
     profile poly_framework_standard
-    lex global/org/polylabs/mail/metering
+    lex global/org/polyqlabs/mail/metering
     @precision C
     @observe metrics: [attachments_metered, attachment_bytes_metered]
     meters [compute_cycles]
@@ -117,7 +117,7 @@ circuit meter_attachment(user_id: bytes(16), attachment_size: u64, is_upload: bo
 // --- Check storage quota for a user ---
 circuit check_storage_quota(user_id: bytes(16), tier: MailTier) -> StorageQuota
     profile poly_framework_standard
-    lex global/org/polylabs/mail/metering
+    lex global/org/polyqlabs/mail/metering
     @precision C
     @observe metrics: [quota_checks, quota_exceeded]
     monitor "quota_warning" { percent_used < 90.0 }
@@ -136,7 +136,7 @@ circuit check_storage_quota(user_id: bytes(16), tier: MailTier) -> StorageQuota
 // --- Get full usage summary for a user ---
 circuit get_usage(user_id: bytes(16)) -> MailUsageSummary
     profile poly_framework_standard
-    lex global/org/polylabs/mail/metering
+    lex global/org/polyqlabs/mail/metering
     @precision C
     @observe metrics: [usage_queries]
     wasm_abi [eslite_query, now]

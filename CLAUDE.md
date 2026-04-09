@@ -1,8 +1,8 @@
-# Poly Mail
+# Q Mail
 
-**GitHub**: [polylabs-dev/polymail](https://github.com/polylabs-dev/polymail)
+**GitHub**: [polylabs-dev/qmail](https://github.com/polylabs-dev/qmail)
 **Platform**: eStream v0.22.0
-**Depends on**: PolyKit v0.3.0, eStream graph/DAG constructs
+**Depends on**: QKit v0.3.0, eStream graph/DAG constructs
 
 100% FastLang. No hand-written Rust.
 
@@ -12,7 +12,7 @@ Post-quantum encrypted email with scatter storage, SMTP/IMAP bridge, and ESLM sp
 
 ## Zero-Linkage Privacy
 
-HKDF context: `poly-mail-v1`. User identities are completely isolated from all other Poly products. StreamSight telemetry stays within `polylabs.mail.*` lex namespace. Blinded billing tokens prevent cross-product correlation.
+HKDF context: `q-mail-v1`. User identities are completely isolated from all other Q products. StreamSight telemetry stays within `polyqlabs.mail.*` lex namespace. Blinded billing tokens prevent cross-product correlation.
 
 ## Structure
 
@@ -27,18 +27,18 @@ HKDF context: `poly-mail-v1`. User identities are completely isolated from all o
 
 | Circuit | File | Description |
 |---------|------|-------------|
-| `polymail_encrypt` | `circuits/fl/polymail_encrypt.fl` | E2E encryption with ML-KEM-1024 |
-| `polymail_classify` | `circuits/fl/polymail_classify.fl` | ESLM spam/phishing classification (on-device) |
-| `polymail_metering` | `circuits/fl/polymail_metering.fl` | Email operation metering |
-| `polymail_platform_health` | `circuits/fl/polymail_platform_health.fl` | Blind relay health monitoring |
-| `polymail_route` | `circuits/fl/polymail_route.fl` | Scatter-CAS routing + MX gateway |
-| `polymail_smtp_bridge` | `circuits/fl/polymail_smtp_bridge.fl` | SMTP/IMAP bridge for classical clients |
-| `polymail_rbac` | `circuits/fl/polymail_rbac.fl` | RBAC graph (Owner, Admin, Member, ReadOnly) |
-| `polymail_search` | `circuits/fl/polymail_search.fl` | Encrypted search index (on-device only) |
-| `polymail_filter` | `circuits/fl/polymail_filter.fl` | Server-side filter rules (metadata only) |
-| `polymail_calendar` | `circuits/fl/polymail_calendar.fl` | iCalendar invite handling |
-| `polymail_mailbox_graph` | `circuits/fl/graphs/polymail_mailbox_graph.fl` | Mailbox registry graph |
-| `polymail_thread_dag` | `circuits/fl/graphs/polymail_thread_dag.fl` | Email thread DAG |
+| `qmail_encrypt` | `circuits/fl/qmail_encrypt.fl` | E2E encryption with ML-KEM-1024 |
+| `qmail_classify` | `circuits/fl/qmail_classify.fl` | ESLM spam/phishing classification (on-device) |
+| `qmail_metering` | `circuits/fl/qmail_metering.fl` | Email operation metering |
+| `qmail_platform_health` | `circuits/fl/qmail_platform_health.fl` | Blind relay health monitoring |
+| `qmail_route` | `circuits/fl/qmail_route.fl` | Scatter-CAS routing + MX gateway |
+| `qmail_smtp_bridge` | `circuits/fl/qmail_smtp_bridge.fl` | SMTP/IMAP bridge for classical clients |
+| `qmail_rbac` | `circuits/fl/qmail_rbac.fl` | RBAC graph (Owner, Admin, Member, ReadOnly) |
+| `qmail_search` | `circuits/fl/qmail_search.fl` | Encrypted search index (on-device only) |
+| `qmail_filter` | `circuits/fl/qmail_filter.fl` | Server-side filter rules (metadata only) |
+| `qmail_calendar` | `circuits/fl/qmail_calendar.fl` | iCalendar invite handling |
+| `qmail_mailbox_graph` | `circuits/fl/graphs/qmail_mailbox_graph.fl` | Mailbox registry graph |
+| `qmail_thread_dag` | `circuits/fl/graphs/qmail_thread_dag.fl` | Email thread DAG |
 
 ## Key Graphs
 

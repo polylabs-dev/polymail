@@ -1,8 +1,8 @@
-# Poly Mail - GitHub Issues
+# Q Mail - GitHub Issues
 
-> GitHub org: [polylabs-dev](https://github.com/polylabs-dev) | Domain: [polylabs.dev](https://polylabs.dev)
+> GitHub org: [polylabs-dev](https://github.com/polylabs-dev) | Domain: [polyqlabs.dev](https://polyqlabs.dev)
 
-## Epic 01: Poly Mail Core
+## Epic 01: Q Mail Core
 
 | # | Issue | Status | Priority |
 |---|-------|--------|----------|
@@ -17,12 +17,12 @@
 | 009 | Scatter storage integration | Open | P0 |
 | 010 | Mobile app scaffold (React Native) | Open | P1 |
 
-## Epic 02: Poly Mail Enterprise
+## Epic 02: Q Mail Enterprise
 
 | # | Issue | Status | Priority |
 |---|-------|--------|----------|
 | 011 | Admin console for organization management | Open | P1 |
 | 012 | Compliance/retention policy engine (FLIR FSM) | Open | P1 |
-| 013 | Poly OAuth SSO integration | Open | P1 |
+| 013 | Q OAuth SSO integration | Open | P1 |
 | 014 | Migration tools (Gmail, Outlook, Exchange) | Open | P1 |
 | 015 | Enterprise SLA infrastructure | Open | P2 |

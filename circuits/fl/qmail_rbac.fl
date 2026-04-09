@@ -1,7 +1,7 @@
-// Poly Mail RBAC — Role-based access control for mailbox operations (v0.12.0)
+// Q Mail RBAC — Role-based access control for mailbox operations (v0.12.0)
 //
 // Lex Architecture:
-//   esn/global/org/polylabs/mail/rbac
+//   esn/global/org/polyqlabs/mail/rbac
 //   Fine-grained RBAC with role hierarchy: Owner > Admin > Member > ReadOnly
 //   Composes eStream's rbac.fl for bitmask permission resolution with role inheritance.
 //
@@ -15,8 +15,8 @@
 //   bit 6: can_export       (0x40) — export mailbox data
 //   bit 7: can_delegate     (0x80) — send-as / delegate access
 
-import polykit_identity
-import polykit_metering
+import qkit_identity
+import qkit_metering
 
 import estream.circuits.core.data.graphs.rbac
 import estream.circuits.core.data.graphs.group_hierarchy
@@ -44,7 +44,7 @@ data MailUser : mail v1 {
     last_active_at: u64,
 }
     store kv
-    govern lex global/org/polylabs/mail/rbac
+    govern lex global/org/polyqlabs/mail/rbac
     cortex {
         redact [email, pubkey]
         obfuscate [user_id]
@@ -60,7 +60,7 @@ data MailboxInfo : mail v1 {
     created_at: u64,
 }
     store kv
-    govern lex global/org/polylabs/mail/rbac
+    govern lex global/org/polyqlabs/mail/rbac
     cortex {
         infer on_write
         on_anomaly alert "mail-team"
@@ -77,7 +77,7 @@ data MailRoleAssignment : mail v1 {
     expires_at: u64,
 }
     store kv
-    govern lex global/org/polylabs/mail/rbac
+    govern lex global/org/polyqlabs/mail/rbac
     cortex {
         redact [granted_by]
         infer on_write
@@ -95,7 +95,7 @@ data DelegateAccess : mail v1 {
     expires_at: u64,
 }
     store kv
-    govern lex global/org/polylabs/mail/rbac
+    govern lex global/org/polyqlabs/mail/rbac
     cortex {
         obfuscate [delegate_user_id]
         infer on_write
@@ -159,7 +159,7 @@ circuit assign_role(
     expires_at: u64,
 ) -> MailRoleAssignment
     profile poly_framework_sensitive
-    lex global/org/polylabs/mail/rbac
+    lex global/org/polyqlabs/mail/rbac
     @precision C
     constant_time true
     @observe metrics: [roles_assigned, role_type, mailbox_assignments]
@@ -205,7 +205,7 @@ circuit revoke_role(
     mailbox_id: bytes(32),
 ) -> bool
     profile poly_framework_standard
-    lex global/org/polylabs/mail/rbac
+    lex global/org/polyqlabs/mail/rbac
     @precision C
     @observe metrics: [roles_revoked]
     monitor "role_revocation_rate" { roles_revoked < 100 per 3600s }
@@ -226,7 +226,7 @@ circuit check_permission(
     permission_bit: u64,
 ) -> bool
     profile poly_framework_standard
-    lex global/org/polylabs/mail/rbac
+    lex global/org/polyqlabs/mail/rbac
     @precision C
     @observe metrics: [permission_checks, permission_grants, permission_denials]
     monitor "permission_denial_rate" { permission_denials < 200 per 60s }
@@ -246,7 +246,7 @@ circuit resolve_effective_permissions(
     mailbox_id: bytes(32),
 ) -> u64
     profile poly_framework_standard
-    lex global/org/polylabs/mail/rbac
+    lex global/org/polyqlabs/mail/rbac
     @precision C
     @observe metrics: [permission_resolutions, inheritance_depth]
     monitor "resolution_latency" { resolution_time_ms < 50 }
@@ -285,7 +285,7 @@ circuit grant_delegate_access(
     expires_at: u64,
 ) -> DelegateAccess
     profile poly_framework_sensitive
-    lex global/org/polylabs/mail/rbac
+    lex global/org/polyqlabs/mail/rbac
     @precision C
     constant_time true
     @observe metrics: [delegates_granted, send_as_grants, read_grants]
@@ -321,7 +321,7 @@ circuit revoke_delegate_access(
     delegate_user_id: bytes(32),
 ) -> bool
     profile poly_framework_standard
-    lex global/org/polylabs/mail/rbac
+    lex global/org/polyqlabs/mail/rbac
     @precision C
     @observe metrics: [delegates_revoked]
     invariant "revoker_is_owner" { has_owner_permission(revoker, grantor_mailbox_id) }

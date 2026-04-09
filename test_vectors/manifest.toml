@@ -1,8 +1,8 @@
 [test_suite]
-name = "polymail golden tests"
-circuit = "polymail_circuits"
+name = "qmail golden tests"
+circuit = "qmail_circuits"
 version = "0.1.0"
 
 [[vectors]]
-file = "polymail.esz"
+file = "qmail.esz"
 tags = ["golden", "happy-path", "crypto", "telemetry-isolation"]
